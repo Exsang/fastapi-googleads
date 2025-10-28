@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual envs
+.venv/
+venv/
+
+# Envs & secrets
+.env
+.env.*
+.env.local
+ngrok.yml
+google_oauth_client.json
+_refresh_token.txt
+.refresh_token.txt
+!*.env.example
+
+# Databases / logs / artifacts
+*.sqlite*
+*.db
+api_usage_log.csv
+
+# IDE/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Diagnostics we might generate
+routes.json
+requirements.lock.txt
+tree.txt
+versions.txt
+project_snapshot.zip
+project_support_bundle_*.zip
