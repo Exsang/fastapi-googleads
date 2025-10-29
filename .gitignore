@@ -3,39 +3,34 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
 *.egg-info/
+.eggs/
+.build/
 dist/
-build/
-
-# Virtual envs
-.venv/
-venv/
 
 # Envs & secrets
 .env
 .env.*
-.env.local
-ngrok.yml
-google_oauth_client.json
-_refresh_token.txt
-.refresh_token.txt
-!*.env.example
+.venv/
+venv/
+.uv/
+poetry.lock
 
-# Databases / logs / artifacts
-*.sqlite*
-*.db
-api_usage_log.csv
-
-# IDE/OS noise
+# IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# Diagnostics we might generate
-routes.json
-requirements.lock.txt
-tree.txt
-versions.txt
-project_snapshot.zip
-project_support_bundle_*.zip
+# Databases & logs
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# Coverage / test
+.coverage
+htmlcov/
+.pytest_cache/
