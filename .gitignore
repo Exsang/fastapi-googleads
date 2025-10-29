@@ -34,3 +34,4 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+.refresh_token.txt
