@@ -16,12 +16,11 @@ class Settings(BaseSettings):
     APP_TITLE: str = "Google Ads API Gateway"
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
 
-    # ----------------------------------------------------------------
+        # ----------------------------------------------------------------
     # Secrets and configuration
     # ----------------------------------------------------------------
-    DEFAULT_SECRETS_DIR: Path = Path(
-        os.path.expandvars(r"%USERPROFILE%\Secrets\google_ads")
-    )
+    DEFAULT_SECRETS_DIR: ClassVar[Path] = Path(r"C:\Users\Coron\Secrets\google_ads")
+
 
     DASH_API_KEY: str = os.getenv("DASH_API_KEY", "")
 

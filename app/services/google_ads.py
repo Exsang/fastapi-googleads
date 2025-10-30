@@ -4,9 +4,8 @@ import datetime as dt
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 
-from ..settings import DEV_TOKEN, LOGIN_CID
+from ..settings import settings
 from .oauth import _load_client_config, read_refresh_token
-
 
 # -----------------------------
 # Core client & shared helpers

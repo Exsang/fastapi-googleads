@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
-from ..settings import GET_CAP, OPS_CAP
+from ..settings import settings
 
 LOG_PATH = Path("api_usage_log.csv")
 
