@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Optional, ClassVar
+from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# --------------------------------------------------------------------
-# Pydantic-based application settings
-# --------------------------------------------------------------------
+
 class Settings(BaseSettings):
     # ----------------------------------------------------------------
     # App metadata
@@ -17,72 +14,39 @@ class Settings(BaseSettings):
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
 
     # ----------------------------------------------------------------
-    # Secrets and configuration
+    # Auth / API keys (env-only; use Codespaces secrets)
     # ----------------------------------------------------------------
-    # Prefer env var; otherwise default to Codespaces path: /workspaces/<repo>/secrets/google_ads
-    DEFAULT_SECRETS_DIR: ClassVar[Path] = Path(
-        os.getenv("DEFAULT_SECRETS_DIR")
-        or (Path("/workspaces") / Path.cwd().name / "secrets" / "google_ads")
-    )
-
     DASH_API_KEY: str = os.getenv("DASH_API_KEY", "")
 
     # ----------------------------------------------------------------
-    # Google Ads / OAuth settings
+    # Google Ads / OAuth settings (env-only; no secrets on disk)
     # ----------------------------------------------------------------
-    DEFAULT_MCC_ID: str = os.getenv("DEFAULT_MCC_ID", "7414394764")
-
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID: Optional[str] = (
-        os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-        or os.getenv("LOGIN_CID")  # legacy fallback
-        or DEFAULT_MCC_ID
+    # Primary MCC / login CID. Prefer LOGIN_CUSTOMER_ID, fall back to defaults/legacy.
+    DEFAULT_MCC_ID: str = (
+        os.getenv("LOGIN_CUSTOMER_ID")
+        or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+        or os.getenv("LOGIN_CID")
+        or os.getenv("DEFAULT_MCC_ID", "7414394764")
     )
 
-    # ✅ Pull from Codespaces secrets first; fall back to legacy names
-    GOOGLE_ADS_DEVELOPER_TOKEN: str = (
-        os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN")
-        or os.getenv("DEV_TOKEN", "")
-    )
-    GOOGLE_ADS_CLIENT_ID: str = (
-        os.getenv("GOOGLE_ADS_CLIENT_ID")
-        or os.getenv("CLIENT_ID", "")
-    )
-    GOOGLE_ADS_CLIENT_SECRET: str = (
-        os.getenv("GOOGLE_ADS_CLIENT_SECRET")
-        or os.getenv("CLIENT_SECRET", "")
-    )
-    GOOGLE_ADS_REFRESH_TOKEN: str = (
-        os.getenv("GOOGLE_ADS_REFRESH_TOKEN")
-        or os.getenv("REFRESH_TOKEN", "")
-    )
+    GOOGLE_ADS_DEVELOPER_TOKEN: str = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
+    GOOGLE_ADS_CLIENT_ID: str = os.getenv("GOOGLE_ADS_CLIENT_ID", "")
+    GOOGLE_ADS_CLIENT_SECRET: str = os.getenv("GOOGLE_ADS_CLIENT_SECRET", "")
+    GOOGLE_ADS_REFRESH_TOKEN: str = os.getenv("GOOGLE_ADS_REFRESH_TOKEN", "")
 
-    GOOGLE_OAUTH_CLIENT_JSON: Path = Path(
-        os.getenv(
-            "GOOGLE_OAUTH_CLIENT_JSON",
-            os.getenv(
-                "OAUTH_CLIENT_JSON_PATH",
-                str(DEFAULT_SECRETS_DIR / "google_oauth_client.json"),
-            ),
-        )
-    )
-
-    GOOGLE_ADS_REFRESH_TOKEN_FILE: Path = Path(
-        os.getenv(
-            "GOOGLE_ADS_REFRESH_TOKEN_FILE",
-            str(DEFAULT_SECRETS_DIR / "_refresh_token.txt"),
-        )
-    )
+    # Optional override if you want to pin a specific Ads API surface for logging only.
+    GOOGLE_ADS_API_VERSION: str = os.getenv("GOOGLE_ADS_API_VERSION", "auto")
 
     OAUTH_REDIRECT_URI: str = os.getenv(
         "OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"
     )
 
-    GOOGLE_ADS_SCOPES: list[str] = [
+    GOOGLE_ADS_SCOPES: List[str] = [
         "https://www.googleapis.com/auth/adwords"
     ]
 
     # ----------------------------------------------------------------
-    # Usage caps (for dashboard or rate limiting)
+    # Usage caps (dashboard/rate limiting)
     # ----------------------------------------------------------------
     BASIC_DAILY_GET_REQUEST_LIMIT: int = int(
         os.getenv("BASIC_DAILY_GET_REQUEST_LIMIT", "1000")
@@ -92,16 +56,14 @@ class Settings(BaseSettings):
     )
 
     # ----------------------------------------------------------------
-    # Server / Environment overrides
+    # Server / Environment
     # ----------------------------------------------------------------
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
-
-    # For dynamic dashboard links; if set, overrides detected host
     PUBLIC_BASE_URL: Optional[str] = os.getenv("PUBLIC_BASE_URL")
 
     # ----------------------------------------------------------------
-    # Config
+    # Pydantic settings
     # ----------------------------------------------------------------
     model_config = SettingsConfigDict(
         env_file=".env",
