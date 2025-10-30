@@ -34,14 +34,27 @@ class Settings(BaseSettings):
 
     GOOGLE_ADS_LOGIN_CUSTOMER_ID: Optional[str] = (
         os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-        or os.getenv("LOGIN_CID")
+        or os.getenv("LOGIN_CID")  # legacy fallback
         or DEFAULT_MCC_ID
     )
 
-    GOOGLE_ADS_DEVELOPER_TOKEN: str = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-    GOOGLE_ADS_CLIENT_ID: str = os.getenv("GOOGLE_ADS_CLIENT_ID", "")
-    GOOGLE_ADS_CLIENT_SECRET: str = os.getenv("GOOGLE_ADS_CLIENT_SECRET", "")
-    GOOGLE_ADS_REFRESH_TOKEN: str = os.getenv("GOOGLE_ADS_REFRESH_TOKEN", "")
+    # ✅ Pull from Codespaces secrets first; fall back to legacy names
+    GOOGLE_ADS_DEVELOPER_TOKEN: str = (
+        os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN")
+        or os.getenv("DEV_TOKEN", "")
+    )
+    GOOGLE_ADS_CLIENT_ID: str = (
+        os.getenv("GOOGLE_ADS_CLIENT_ID")
+        or os.getenv("CLIENT_ID", "")
+    )
+    GOOGLE_ADS_CLIENT_SECRET: str = (
+        os.getenv("GOOGLE_ADS_CLIENT_SECRET")
+        or os.getenv("CLIENT_SECRET", "")
+    )
+    GOOGLE_ADS_REFRESH_TOKEN: str = (
+        os.getenv("GOOGLE_ADS_REFRESH_TOKEN")
+        or os.getenv("REFRESH_TOKEN", "")
+    )
 
     GOOGLE_OAUTH_CLIENT_JSON: Path = Path(
         os.getenv(
@@ -79,10 +92,13 @@ class Settings(BaseSettings):
     )
 
     # ----------------------------------------------------------------
-    # Server
+    # Server / Environment overrides
     # ----------------------------------------------------------------
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
+
+    # For dynamic dashboard links; if set, overrides detected host
+    PUBLIC_BASE_URL: Optional[str] = os.getenv("PUBLIC_BASE_URL")
 
     # ----------------------------------------------------------------
     # Config

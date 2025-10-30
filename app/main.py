@@ -10,6 +10,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+# ✅ Prefer Starlette's ProxyHeadersMiddleware, fallback to Uvicorn if unavailable
+try:
+    from starlette.middleware.proxy_headers import ProxyHeadersMiddleware  # Starlette ≥ 0.27
+except Exception:  # pragma: no cover
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware  # Fallback
+
 # ---------------------------------------------------------------------
 # Load environment variables before imports that depend on them
 # ---------------------------------------------------------------------
@@ -30,7 +36,8 @@ try:
     elif repo_env.exists():
         load_dotenv(repo_env, override=True)
 except Exception:
-    pass  # If dotenv isn't installed, continue using system env only
+    # If python-dotenv isn't installed or anything else goes wrong, proceed with system env only.
+    pass
 
 # ---------------------------------------------------------------------
 # Imports (load after .env)
@@ -57,11 +64,12 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     logger.info("Starting FastAPI + Google Ads service")
 
+    # We don't require GOOGLE_ADS_REFRESH_TOKEN at startup anymore,
+    # because the app can use the stored token file from /auth/start.
     required_env = [
         "GOOGLE_ADS_DEVELOPER_TOKEN",
         "GOOGLE_ADS_CLIENT_ID",
         "GOOGLE_ADS_CLIENT_SECRET",
-        "GOOGLE_ADS_REFRESH_TOKEN",
         "DASH_API_KEY",
     ]
     missing = [k for k in required_env if not os.environ.get(k)]
@@ -96,6 +104,11 @@ APP.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------
+# Trust proxy headers (so request.base_url matches forwarded host/proto)
+# ---------------------------------------------------------------------
+APP.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # ---------------------------------------------------------------------
 # Routes

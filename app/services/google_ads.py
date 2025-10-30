@@ -1,38 +1,121 @@
-from typing import List, Tuple, Any, Dict, Optional, Literal
+# app/services/google_ads.py
+from __future__ import annotations
+
+import os
 import datetime as dt
+from typing import Any, Dict, List, Optional, Tuple, Literal
 
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 
 from ..settings import settings
-from .oauth import _load_client_config, read_refresh_token
+from .oauth import read_refresh_token  # env + file only (no YAML)
 
-# -----------------------------
+# ------------------------------------------------------------
+# API version detection (with env override + probing)
+# ------------------------------------------------------------
+def _first_importable_version(candidates: List[str]) -> Optional[str]:
+    for ver in candidates:
+        try:
+            __import__(f"google.ads.googleads.{ver}")
+            return ver
+        except Exception:
+            continue
+    return None
+
+def _detect_api_version() -> str:
+    """
+    Pick the newest Ads API version actually available in the installed
+    'google-ads' package. If GOOGLE_ADS_API_VERSION is set, use it only if
+    it can be imported.
+    """
+    # Try an explicit override first, but verify it exists.
+    forced = os.getenv("GOOGLE_ADS_API_VERSION")
+    if forced:
+        try:
+            __import__(f"google.ads.googleads.{forced}")
+            return forced
+        except Exception:
+            # Fall through to probing if the forced version isn't present
+            pass
+
+    # Probe newest → older. Extend this list when upgrading the SDK.
+    candidates = ["v20", "v19", "v18", "v17", "v16", "v15"]
+    ver = _first_importable_version(candidates)
+    if not ver:
+        # As a last resort, v17 is a safe default for many installs.
+        ver = "v17"
+    return ver
+
+_API_VERSION = _detect_api_version()
+
+# ------------------------------------------------------------
 # Core client & shared helpers
-# -----------------------------
+# ------------------------------------------------------------
 def google_ads_client() -> GoogleAdsClient:
-    if not DEV_TOKEN:
-        raise RuntimeError("Missing GOOGLE_ADS_DEVELOPER_TOKEN.")
-    refresh_token = read_refresh_token()
+    """
+    Build a GoogleAdsClient purely from environment-backed settings (Codespaces secrets).
+    Force-ignore any google-ads.yaml by unsetting GOOGLE_ADS_CONFIGURATION_FILE.
+    Use top-level OAuth keys for broad client-version compatibility.
+    """
+    # Ensure no YAML file is used implicitly
+    os.environ.pop("GOOGLE_ADS_CONFIGURATION_FILE", None)
+
+    # Validate required secrets early
+    if not settings.GOOGLE_ADS_DEVELOPER_TOKEN:
+        raise RuntimeError("Missing GOOGLE_ADS_DEVELOPER_TOKEN (set in Codespaces secrets).")
+    if not settings.GOOGLE_ADS_CLIENT_ID or not settings.GOOGLE_ADS_CLIENT_SECRET:
+        raise RuntimeError("Missing GOOGLE_ADS_CLIENT_ID / GOOGLE_ADS_CLIENT_SECRET (set in Codespaces secrets).")
+
+    refresh_token = read_refresh_token() or settings.GOOGLE_ADS_REFRESH_TOKEN
     if not refresh_token:
-        raise RuntimeError("Missing refresh token. Run the OAuth flow at /auth/start first.")
-    cfg = _load_client_config()
-    config = {
-        "developer_token": DEV_TOKEN,
-        "login_customer_id": LOGIN_CID if LOGIN_CID else None,
-        "client_id": cfg["web"]["client_id"],
-        "client_secret": cfg["web"]["client_secret"],
-        "refresh_token": refresh_token,
+        raise RuntimeError(
+            "Missing refresh token. Run the OAuth flow at /auth/start to store one, "
+            "or set GOOGLE_ADS_REFRESH_TOKEN in Codespaces secrets."
+        )
+
+    # Top-level keys (compatible across client versions)
+    cfg = {
+        "developer_token": settings.GOOGLE_ADS_DEVELOPER_TOKEN,
+        "login_customer_id": settings.GOOGLE_ADS_LOGIN_CUSTOMER_ID,  # optional but recommended for MCC use
         "use_proto_plus": True,
+        "client_id": settings.GOOGLE_ADS_CLIENT_ID,
+        "client_secret": settings.GOOGLE_ADS_CLIENT_SECRET,
+        "refresh_token": refresh_token,
     }
-    return GoogleAdsClient.load_from_dict(config)
 
+    return GoogleAdsClient.load_from_dict(cfg)
 
-def search_stream(client: GoogleAdsClient, customer_id: str, query: str) -> Tuple[List[Any], str | None]:
-    ga = client.get_service("GoogleAdsService")
-    stream = ga.search_stream(customer_id=customer_id, query=query)
+def _get_service_any_version(client: GoogleAdsClient, name: str) -> Tuple[Any, str]:
+    """
+    Try the pinned _API_VERSION first, then fall back to older versions until one loads.
+    Returns (service, version_str). Raises last error if none succeed.
+    """
+    candidates = [_API_VERSION, "v20", "v19", "v18", "v17", "v16", "v15"]
+    seen = set()
+    ordered = [v for v in candidates if not (v in seen or seen.add(v))]  # de-dup but keep order
+
+    last_err: Optional[Exception] = None
+    for ver in ordered:
+        try:
+            svc = client.get_service(name, version=ver)
+            return svc, ver
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err if last_err else RuntimeError(f"Failed to resolve service {name} for any known version")
+
+def search_stream(client: GoogleAdsClient, customer_id: str, query: str) -> Tuple[List[Any], Optional[str]]:
+    """
+    Stream GAQL results into a list. Returns (rows, request_id).
+    Uses the detected API version, with graceful service fallback.
+    """
     results: List[Any] = []
-    req_id = None
+    req_id: Optional[str] = None
+
+    ga, _ver = _get_service_any_version(client, "GoogleAdsService")
+    stream = ga.search_stream(customer_id=customer_id, query=query)
+
     for batch in stream:
         if req_id is None:
             req_id = getattr(batch, "request_id", None)
@@ -40,23 +123,20 @@ def search_stream(client: GoogleAdsClient, customer_id: str, query: str) -> Tupl
             results.append(row)
     return results, req_id
 
-
-def micros_to_currency(micros: int) -> float:
+def micros_to_currency(micros: Optional[int]) -> float:
     try:
-        return round((micros or 0) / 1_000_000, 6)
+        return round((micros or 0) / 1_000_000.0, 6)
     except Exception:
         return 0.0
 
-
-# -----------------------------
+# ------------------------------------------------------------
 # YTD report helpers
-# -----------------------------
+# ------------------------------------------------------------
 def _ytd_bounds(today: Optional[dt.date] = None) -> Tuple[str, str]:
     """Return ('YYYY-01-01', 'YYYY-MM-DD') for current year-to-date."""
     today = today or dt.date.today()
     start = dt.date(today.year, 1, 1)
     return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
-
 
 def _gaql_for_ytd(
     breakdown: Literal["customer", "campaign"] = "customer",
@@ -101,10 +181,8 @@ def _gaql_for_ytd(
         filters.append("metrics.impressions > 0")
 
     where_clause = "WHERE " + " AND ".join(filters)
-
     return f"""{select}
 {where_clause}"""
-
 
 def _to_float(x: Any) -> float:
     try:
@@ -112,38 +190,21 @@ def _to_float(x: Any) -> float:
     except Exception:
         return 0.0
 
-
 def _to_int(x: Any) -> int:
     try:
         return int(x or 0)
     except Exception:
         return 0
 
-
-# -----------------------------
+# ------------------------------------------------------------
 # Public YTD runner
-# -----------------------------
+# ------------------------------------------------------------
 def run_ytd_report(
     customer_id: str,
     breakdown: Literal["customer", "campaign"] = "customer",
     include_zero_impressions: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Execute a YTD report for the given customer_id.
-
-    Returns:
-      {
-        ok: bool,
-        date_range: {start, end},
-        customer_id: str,
-        breakdown: "customer"|"campaign",
-        rows: [...],
-        row_count: int,
-        request_id: str|None,
-        gaql: str,
-        note: str
-      }
-    """
+    """Execute a YTD report for the given customer_id."""
     start, end = _ytd_bounds()
     date_filter = f"segments.date BETWEEN '{start}' AND '{end}'"
 
@@ -196,6 +257,7 @@ def run_ytd_report(
 
     return {
         "ok": True,
+        "api_version": _API_VERSION,
         "date_range": {"start": start, "end": end},
         "customer_id": customer_id,
         "breakdown": breakdown,
@@ -205,3 +267,12 @@ def run_ytd_report(
         "gaql": gaql_final,
         "note": "Aggregated over YTD (Jan 1 to today). Set breakdown=campaign for per-campaign rows.",
     }
+
+__all__ = [
+    "google_ads_client",
+    "search_stream",
+    "micros_to_currency",
+    "run_ytd_report",
+    "_API_VERSION",
+    "_get_service_any_version",  # exported for routers that want per-service fallback
+]

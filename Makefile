@@ -11,8 +11,11 @@ HOST ?= 0.0.0.0
 PORT ?= 8000
 ENV_FILE ?= .env
 
+PID_FILE := .codespace/api.pid
+LOG_FILE := logs/api.log
+
 # ----- Phony -----
-.PHONY: help venv install bootstrap dev run reload test lint format fix check clean freeze
+.PHONY: help venv install bootstrap dev run reload test lint format fix check clean freeze stop restart logs ensure_uvicorn
 
 # ----- Help -----
 help:
@@ -20,7 +23,7 @@ help:
 	@echo "  make bootstrap    Create venv + install prod & dev deps"
 	@echo "  make venv         Create virtualenv at .venv"
 	@echo "  make install      Install requirements (+ requirements-dev.txt if present)"
-	@echo "  make dev          Run API with reload (Uvicorn) on $(HOST):$(PORT)"
+	@echo "  make dev          Run API with reload (Uvicorn) on $(HOST):$(PORT) + proxy headers"
 	@echo "  make run          Run API without reload"
 	@echo "  make reload       Alias of 'dev'"
 	@echo "  make test         Run pytest"
@@ -30,6 +33,9 @@ help:
 	@echo "  make check        Lint + Test"
 	@echo "  make clean        Remove caches"
 	@echo "  make freeze       Write pinned deps to requirements.lock.txt"
+	@echo "  make stop         Kill uvicorn (if running)"
+	@echo "  make restart      Stop then dev"
+	@echo "  make logs         Tail $(LOG_FILE)"
 
 # ----- Env / install -----
 venv:
@@ -37,20 +43,24 @@ venv:
 	@$(PIP) -q install --upgrade pip wheel setuptools
 
 install: venv
-	@$(PIP) -q install -r requirements.txt
+	@$(PIP) -q install -r requirements.txt || true
 	@if [ -f requirements-dev.txt ]; then $(PIP) -q install -r requirements-dev.txt; fi
 
 bootstrap: venv install
 	@echo "Bootstrap complete ✅"
 
+# Ensure uvicorn (and friends) exist in venv
+ensure_uvicorn: venv
+	@{ test -x "$(UVICORN)" || (echo "Installing uvicorn/fastapi/starlette/watchfiles into venv..." && $(PIP) install -q -U uvicorn fastapi starlette watchfiles); }
+
 # ----- Run -----
-dev:
-	@$(UVICORN) $(APP) --reload --host $(HOST) --port $(PORT) --env-file $(ENV_FILE)
+dev: ensure_uvicorn
+	@$(UVICORN) $(APP) --reload --host $(HOST) --port $(PORT) --env-file $(ENV_FILE) --proxy-headers
 
 reload: dev
 
-run:
-	@$(UVICORN) $(APP) --host $(HOST) --port $(PORT) --env-file $(ENV_FILE)
+run: ensure_uvicorn
+	@$(UVICORN) $(APP) --host $(HOST) --port $(PORT) --env-file $(ENV_FILE) --proxy-headers
 
 # ----- Quality -----
 test:
@@ -78,22 +88,12 @@ freeze:
 	@$(PIP) freeze > requirements.lock.txt
 	@echo "Wrote requirements.lock.txt"
 
-PID_FILE := .codespace/api.pid
-LOG_FILE := logs/api.log
-
-.PHONY: stop restart logs
-
 stop:
-	@if [ -f $(PID_FILE) ]; then \
-		PID=$$(cat $(PID_FILE)); \
-		if ps -p $$PID >/dev/null 2>&1; then \
-			echo "Stopping API (PID $$PID)"; \
-			kill $$PID || true; \
-			sleep 1; \
-		fi; \
-		rm -f $(PID_FILE); \
+	@if pgrep -f "uvicorn.*$(APP)" >/dev/null 2>&1; then \
+		echo "Stopping uvicorn..."; \
+		pkill -f "uvicorn.*$(APP)" || true; \
 	else \
-		echo "No PID file found; nothing to stop."; \
+		echo "No uvicorn process found."; \
 	fi
 
 restart: stop
