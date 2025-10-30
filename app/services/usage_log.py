@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import csv
-import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from ..settings import settings
 
@@ -28,6 +27,7 @@ def log_api_usage(
     request_type: str,
     operations: int,
 ) -> None:
+    """Append one usage row to the CSV log."""
     _ensure_log_header()
     ts = datetime.now(timezone.utc).isoformat()
     with LOG_PATH.open("a", newline="", encoding="utf-8") as f:
@@ -35,10 +35,10 @@ def log_api_usage(
         writer.writerow([ts, scope_id, request_id or "", endpoint, request_type, operations])
 
 
-def _read_all_rows() -> list[Dict[str, Any]]:
+def _read_all_rows() -> List[Dict[str, Any]]:
     if not LOG_PATH.exists():
         return []
-    rows: list[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     with LOG_PATH.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -46,29 +46,44 @@ def _read_all_rows() -> list[Dict[str, Any]]:
     return rows
 
 
-def dashboard_stats(default_mcc_id: str) -> Dict[str, Any]:
+# ---------- Functions expected by app/routers/usage.py ----------
+
+def read_usage_log() -> List[Dict[str, Any]]:
+    """Return all usage rows as a list of dicts (for /usage/usage-log)."""
+    return _read_all_rows()
+
+
+def usage_summary() -> Dict[str, Any]:
     """
-    Summarize today's and all-time usage from the local CSV log.
-    Pulls caps from settings (Pydantic), replacing old GET_CAP/OPS_CAP constants.
+    Summarize usage for the /usage/usage-summary endpoint.
+    Provides totals and today's counts; caps come from Pydantic settings.
     """
     rows = _read_all_rows()
-
-    # Caps now come from settings
     get_cap = settings.BASIC_DAILY_GET_REQUEST_LIMIT
     ops_cap = settings.BASIC_DAILY_OPERATION_LIMIT
 
     total_usage_rows = len(rows)
-    today = datetime.now(timezone.utc).date()
+    total_operations = 0
+    total_get_requests = 0
 
+    today = datetime.now(timezone.utc).date()
     today_usage_rows = 0
     today_get_requests = 0
     today_operations = 0
 
     for r in rows:
+        # totals
+        try:
+            total_operations += int(r.get("operations") or 0)
+        except ValueError:
+            pass
+        if (r.get("request_type") or "").lower() == "get":
+            total_get_requests += 1
+
+        # today
         try:
             ts = datetime.fromisoformat(r["ts"])
         except Exception:
-            # skip malformed rows
             continue
         if ts.date() == today:
             today_usage_rows += 1
@@ -81,10 +96,22 @@ def dashboard_stats(default_mcc_id: str) -> Dict[str, Any]:
 
     return {
         "total_usage_rows": total_usage_rows,
+        "total_operations": total_operations,
+        "total_get_requests": total_get_requests,
         "today_usage_rows": today_usage_rows,
         "today_get_requests": today_get_requests,
         "today_operations": today_operations,
         "get_cap": get_cap,
         "ops_cap": ops_cap,
+    }
+
+
+# ---------- Dashboard helper used by /misc ----------
+
+def dashboard_stats(default_mcc_id: str) -> Dict[str, Any]:
+    """Compact stats for the HTML dashboard."""
+    s = usage_summary()
+    return {
+        **s,
         "default_mcc_id": default_mcc_id,
     }

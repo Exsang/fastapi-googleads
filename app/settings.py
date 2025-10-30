@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional, ClassVar
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 # --------------------------------------------------------------------
 # Pydantic-based application settings
@@ -16,11 +16,14 @@ class Settings(BaseSettings):
     APP_TITLE: str = "Google Ads API Gateway"
     APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
 
-        # ----------------------------------------------------------------
+    # ----------------------------------------------------------------
     # Secrets and configuration
     # ----------------------------------------------------------------
-    DEFAULT_SECRETS_DIR: ClassVar[Path] = Path(r"C:\Users\Coron\Secrets\google_ads")
-
+    # Prefer env var; otherwise default to Codespaces path: /workspaces/<repo>/secrets/google_ads
+    DEFAULT_SECRETS_DIR: ClassVar[Path] = Path(
+        os.getenv("DEFAULT_SECRETS_DIR")
+        or (Path("/workspaces") / Path.cwd().name / "secrets" / "google_ads")
+    )
 
     DASH_API_KEY: str = os.getenv("DASH_API_KEY", "")
 
@@ -29,9 +32,11 @@ class Settings(BaseSettings):
     # ----------------------------------------------------------------
     DEFAULT_MCC_ID: str = os.getenv("DEFAULT_MCC_ID", "7414394764")
 
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID: Optional[str] = os.getenv(
-        "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
-    ) or os.getenv("LOGIN_CID") or DEFAULT_MCC_ID
+    GOOGLE_ADS_LOGIN_CUSTOMER_ID: Optional[str] = (
+        os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+        or os.getenv("LOGIN_CID")
+        or DEFAULT_MCC_ID
+    )
 
     GOOGLE_ADS_DEVELOPER_TOKEN: str = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
     GOOGLE_ADS_CLIENT_ID: str = os.getenv("GOOGLE_ADS_CLIENT_ID", "")
@@ -58,6 +63,7 @@ class Settings(BaseSettings):
     OAUTH_REDIRECT_URI: str = os.getenv(
         "OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"
     )
+
     GOOGLE_ADS_SCOPES: list[str] = [
         "https://www.googleapis.com/auth/adwords"
     ]

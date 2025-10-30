@@ -1,0 +1,35 @@
+{
+  "name": "FastAPI + Google Ads (Codespace)",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    }
+  },
+  "forwardPorts": [
+    8000
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": "FastAPI",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "editor.formatOnSave": true
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-python.black-formatter",
+        "ms-toolsai.jupyter",
+        "github.vscode-github-actions"
+      ]
+    }
+  },
+  "postStartCommand": "bash .devcontainer/postStart.sh"
+}
