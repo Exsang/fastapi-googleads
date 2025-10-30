@@ -1,4 +1,3 @@
-# app/routers/misc.py
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pathlib import Path
@@ -6,7 +5,7 @@ import re
 import json
 
 from ..deps.auth import require_auth
-from ..settings import DEFAULT_MCC_ID, GET_CAP, OPS_CAP
+from ..settings import settings, DEFAULT_MCC_ID
 from ..services.oauth import read_refresh_token
 from ..services.usage_log import dashboard_stats
 
@@ -37,8 +36,11 @@ def home(request: Request):
     def fmt(n):
         return "—" if n is None else f"{n:,}"
 
-    rem_gets = max(stats["get_cap"] - stats.get("today_get_requests", 0), 0)
-    rem_ops = max(stats["ops_cap"] - stats.get("today_operations", 0), 0)
+    get_cap = settings.BASIC_DAILY_GET_REQUEST_LIMIT
+    ops_cap = settings.BASIC_DAILY_OPERATION_LIMIT
+
+    rem_gets = max(get_cap - stats.get("today_get_requests", 0), 0)
+    rem_ops = max(ops_cap - stats.get("today_operations", 0), 0)
 
     # Compact stat cards
     stat_cards = f"""
@@ -54,12 +56,12 @@ def home(request: Request):
         <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div class="text-sm text-slate-500">GET requests (today)</div>
           <div class="mt-1 text-2xl font-semibold">{fmt(stats.get('today_get_requests'))}</div>
-          <div class="text-xs text-slate-500 mt-1">Cap: {stats['get_cap']:,} • Remaining: {rem_gets:,}</div>
+          <div class="text-xs text-slate-500 mt-1">Cap: {get_cap:,} • Remaining: {rem_gets:,}</div>
         </div>
         <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div class="text-sm text-slate-500">Operations (today)</div>
           <div class="mt-1 text-2xl font-semibold">{fmt(stats.get('today_operations'))}</div>
-          <div class="text-xs text-slate-500 mt-1">Cap: {stats['ops_cap']:,} • Remaining: {rem_ops:,}</div>
+          <div class="text-xs text-slate-500 mt-1">Cap: {ops_cap:,} • Remaining: {rem_ops:,}</div>
         </div>
       </div>
     """
@@ -91,7 +93,6 @@ def home(request: Request):
         ],
     }
 
-    # Render each section as a card with a compact, responsive grid of link-buttons.
     def render_section(title, links):
         links_html = "".join(
             f'''
@@ -103,7 +104,6 @@ def home(request: Request):
             '''
             for text, href in links
         )
-        # Inside the card: auto-fit min width tiles so items wrap instead of going long
         return f"""
         <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 class="text-base font-semibold mb-3">{title}</h2>
@@ -113,7 +113,6 @@ def home(request: Request):
         </section>
         """
 
-    # Grid of sections: up to 3 columns on wide screens
     body = "".join(render_section(title, links) for title, links in pages.items())
 
     html = f"""
@@ -185,14 +184,13 @@ def list_routes(request: Request):
 @router.get("/debug/env")
 def debug_env():
     """Preview core runtime env/config info (safe to print)."""
-    import os
-    dt = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-    login = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "")
+    dt = settings.GOOGLE_ADS_DEVELOPER_TOKEN
+    login = settings.GOOGLE_ADS_LOGIN_CUSTOMER_ID
     return {
         "dev_token_preview": f"{dt[:6]}...{dt[-4:]}" if dt else None,
         "login_customer_id": login or None,
-        "get_cap": GET_CAP,
-        "ops_cap": OPS_CAP,
+        "get_cap": settings.BASIC_DAILY_GET_REQUEST_LIMIT,
+        "ops_cap": settings.BASIC_DAILY_OPERATION_LIMIT,
         "source": ".env override=True",
     }
 
@@ -269,7 +267,7 @@ def env_summary():
         except json.JSONDecodeError:
             return None
 
-    settings = extract_json_block("Settings snapshot \(selected\)")
+    settings_json = extract_json_block("Settings snapshot \(selected\)")
     versions = extract_json_block("Package versions")
 
     # Folder tree
@@ -283,7 +281,7 @@ def env_summary():
         "routes_count": routes_count if routes_count is not None else len(routes),
         "namespaces": namespaces,
         "routes": routes,
-        "settings": settings,
+        "settings": settings_json,
         "versions": versions,
         "folder_tree": folder_tree,
     }

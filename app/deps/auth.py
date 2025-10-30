@@ -1,29 +1,23 @@
-from typing import Optional
-from fastapi import Depends, Cookie, Query, Header, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from ..settings import API_KEY
-
-auth_scheme = HTTPBearer(auto_error=False)
+# app/deps/auth.py
+from fastapi import Header, HTTPException, status, Cookie
+from ..settings import settings
 
 def require_auth(
-    creds: HTTPAuthorizationCredentials = Depends(auth_scheme),
-    x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key", convert_underscores=False),
-    dash_auth: Optional[str] = Cookie(default=None),
-    key_qs: Optional[str] = Query(default=None, alias="key"),
-):
-    # If no API key configured, run in dev mode (no auth)
-    if not API_KEY:
-        return
+    x_api_key: str | None = Header(default=None),
+    dash_auth: str | None = Cookie(default=None),
+) -> None:
+    """Accept API key from header OR cookie."""
+    expected_key = settings.DASH_API_KEY
 
-    presented = None
-    if creds and creds.scheme and creds.credentials and creds.scheme.lower() == "bearer":
-        presented = creds.credentials
-    if not presented and x_api_key:
-        presented = x_api_key
-    if not presented and dash_auth:
-        presented = dash_auth
-    if not presented and key_qs:
-        presented = key_qs
+    if not expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfigured: DASH_API_KEY not set.",
+        )
 
-    if presented != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    supplied = x_api_key or dash_auth
+    if supplied != expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
