@@ -45,3 +45,13 @@ secrets/
 .vscode/
 *.csv
 *.pid
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+secrets/
+.codespace/
+.vscode/
+*.csv
+*.pid
