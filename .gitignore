@@ -35,3 +35,4 @@ logs/
 htmlcov/
 .pytest_cache/
 .refresh_token.txt
+.codespace/
