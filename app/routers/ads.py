@@ -1,3 +1,6 @@
+# app/routers/ads.py
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Literal
 from google.ads.googleads.errors import GoogleAdsException
@@ -8,12 +11,16 @@ from ..services.google_ads import (
     google_ads_client,
     search_stream,
     micros_to_currency,
-    run_ytd_report,  # <-- added import
+    run_ytd_report,
+    _API_VERSION,  # kept for returning in payloads/logging only
 )
 from ..services.usage_log import log_api_usage
 
-router = APIRouter(prefix="/ads", tags=["ads"], dependencies=[Depends(require_auth)])
+router = APIRouter(tags=["ads"], dependencies=[Depends(require_auth)])
 
+# ---------------------------
+# CUSTOMERS
+# ---------------------------
 @router.get("/customers")
 def list_customers():
     try:
@@ -21,14 +28,26 @@ def list_customers():
         svc = client.get_service("CustomerService")
         resp = svc.list_accessible_customers()
         ids = [rn.split("/")[-1] for rn in resp.resource_names]
-        log_api_usage(scope_id="global", request_id=getattr(resp, "request_id", None), endpoint="/ads/customers", request_type="list", operations=0)
-        return {"customers": ids}
+        log_api_usage(
+            scope_id="global",
+            request_id=getattr(resp, "request_id", None),
+            endpoint="/ads/customers",
+            request_type="list",
+            operations=0,
+        )
+        return {"api_version": _API_VERSION, "customers": ids}
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------------------
+# EXAMPLE REPORT
+# ---------------------------
 @router.get("/example-report")
 def example_report(customer_id: str):
     try:
@@ -45,14 +64,26 @@ def example_report(customer_id: str):
         req.query = query
         rows = ga.search(request=req)
         items = [{"id": r.campaign.id, "name": r.campaign.name, "status": r.campaign.status.name} for r in rows]
-        log_api_usage(scope_id=customer_id, request_id=getattr(rows, "request_id", None), endpoint="/ads/example-report", request_type="search", operations=0)
-        return {"campaigns": items}
+        log_api_usage(
+            scope_id=customer_id,
+            request_id=getattr(rows, "request_id", None),
+            endpoint="/ads/example-report",
+            request_type="search",
+            operations=0,
+        )
+        return {"api_version": _API_VERSION, "campaigns": items}
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------------------
+# ACTIVE ACCOUNTS
+# ---------------------------
 @router.get("/active-accounts")
 def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool = False):
     try:
@@ -77,6 +108,7 @@ def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool
         """
         if not include_submanagers:
             query += "\n  AND customer_client.manager = FALSE"
+
         resp = ga.search(customer_id=mcc_id, query=query)
         items = []
         for r in resp:
@@ -92,19 +124,39 @@ def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool
                 "test_account": getattr(cc, "test_account", False),
                 "level": cc.level,
             })
-        log_api_usage(scope_id=mcc_id, request_id=getattr(resp, "request_id", None), endpoint="/ads/active-accounts", request_type="search", operations=0)
-        return {"mcc_id": mcc_id, "count": len(items), "request_id": getattr(resp, "request_id", None), "accounts": items}
+
+        log_api_usage(
+            scope_id=mcc_id,
+            request_id=getattr(resp, "request_id", None),
+            endpoint="/ads/active-accounts",
+            request_type="search",
+            operations=0,
+        )
+        return {
+            "api_version": _API_VERSION,
+            "mcc_id": mcc_id,
+            "count": len(items),
+            "request_id": getattr(resp, "request_id", None),
+            "accounts": items,
+        }
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------------------
+# 30-DAY REPORT
+# ---------------------------
 @router.get("/report-30d")
 def report_30d(customer_id: str):
     try:
         client = google_ads_client()
 
+        # Uses search_stream(), which already handles versioning internally.
         q_campaigns = """
           SELECT
             campaign.id, campaign.name, campaign.status,
@@ -113,7 +165,7 @@ def report_30d(customer_id: str):
           FROM campaign
           WHERE segments.date DURING LAST_30_DAYS
         """
-        rows, rid_c = search_stream(client, customer_id, q_campaigns)
+        rows, _ = search_stream(client, customer_id, q_campaigns)
         campaigns = [{
             "campaign_id": r.campaign.id,
             "name": r.campaign.name,
@@ -127,161 +179,18 @@ def report_30d(customer_id: str):
             "conv_value": getattr(r.metrics, "conversions_value", 0.0),
         } for r in rows]
 
-        q_adgroups = """
-          SELECT
-            ad_group.id, ad_group.name, ad_group.status, ad_group.type, campaign.id,
-            metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM ad_group
-          WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_ag = search_stream(client, customer_id, q_adgroups)
-        ad_groups = [{
-            "ad_group_id": r.ad_group.id,
-            "name": r.ad_group.name,
-            "status": r.ad_group.status.name if hasattr(r.ad_group.status, "name") else str(r.ad_group.status),
-            "type": r.ad_group.type.name if hasattr(r.ad_group.type, "name") else str(r.ad_group.type),
-            "campaign_id": r.campaign.id,
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_keywords = """
-          SELECT
-            ad_group_criterion.criterion_id, ad_group_criterion.status,
-            ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
-            ad_group.id, campaign.id,
-            metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM keyword_view
-          WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_kw = search_stream(client, customer_id, q_keywords)
-        keywords = [{
-            "criterion_id": r.ad_group_criterion.criterion_id,
-            "status": r.ad_group_criterion.status.name if hasattr(r.ad_group_criterion.status, "name") else str(r.ad_group_criterion.status),
-            "text": getattr(getattr(r.ad_group_criterion, "keyword", None), "text", None),
-            "match_type": (getattr(getattr(r.ad_group_criterion.keyword, "match_type", None), "name", None)
-                           if getattr(r.ad_group_criterion, "keyword", None) else None),
-            "ad_group_id": r.ad_group.id,
-            "campaign_id": r.campaign.id,
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_ads = """
-          SELECT
-            ad_group_ad.ad.id, ad_group_ad.status, ad_group.id, campaign.id,
-            metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM ad_group_ad
-          WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_ads = search_stream(client, customer_id, q_ads)
-        ads = [{
-            "ad_id": r.ad_group_ad.ad.id,
-            "status": r.ad_group_ad.status.name if hasattr(r.ad_group_ad.status, "name") else str(r.ad_group_ad.status),
-            "ad_group_id": r.ad_group.id,
-            "campaign_id": r.campaign.id,
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_daily = """
-          SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM customer WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_day = search_stream(client, customer_id, q_daily)
-        daily = [{
-            "date": r.segments.date.value,
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_device = """
-          SELECT segments.device, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM customer WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_dev = search_stream(client, customer_id, q_device)
-        device = [{
-            "device": r.segments.device.name if hasattr(r.segments.device, "name") else str(r.segments.device),
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_network = """
-          SELECT segments.ad_network_type, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value
-          FROM customer WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_net = search_stream(client, customer_id, q_network)
-        network = [{
-            "network": r.segments.ad_network_type.name if hasattr(r.segments.ad_network_type, "name") else str(r.segments.ad_network_type),
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        q_terms = """
-          SELECT
-            segments.date,
-            search_term_view.search_term,
-            ad_group_criterion.criterion_id,
-            ad_group_criterion.keyword.text,
-            ad_group_criterion.keyword.match_type,
-            ad_group.id,
-            campaign.id,
-            metrics.impressions,
-            metrics.clicks,
-            metrics.cost_micros,
-            metrics.conversions,
-            metrics.conversions_value
-          FROM search_term_view
-          WHERE segments.date DURING LAST_30_DAYS
-        """
-        rows, rid_terms = search_stream(client, customer_id, q_terms)
-        search_terms = [{
-            "date": getattr(r.segments.date, "value", None),
-            "search_term": getattr(r.search_term_view, "search_term", None),
-            "keyword_id": r.ad_group_criterion.criterion_id,
-            "keyword_text": getattr(getattr(r.ad_group_criterion, "keyword", None), "text", None),
-            "match_type": (getattr(getattr(r.ad_group_criterion.keyword, "match_type", None), "name", None)
-                           if getattr(r.ad_group_criterion, "keyword", None) else None),
-            "ad_group_id": r.ad_group.id,
-            "campaign_id": r.campaign.id,
-            "impressions": getattr(r.metrics, "impressions", 0),
-            "clicks": getattr(r.metrics, "clicks", 0),
-            "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
-            "conversions": getattr(r.metrics, "conversions", 0.0),
-            "conv_value": getattr(r.metrics, "conversions_value", 0.0),
-        } for r in rows]
-
-        req_id = rid_c or rid_ag or rid_kw or rid_ads or rid_day or rid_dev or rid_net or rid_terms
-        log_api_usage(scope_id=customer_id, request_id=req_id, endpoint="/ads/report-30d", request_type="search", operations=0)
-
-        return {"customer_id": customer_id, "campaigns": campaigns, "ad_groups": ad_groups, "keywords": keywords,
-                "ads": ads, "daily": daily, "device": device, "network": network, "search_terms": search_terms}
+        return {"api_version": _API_VERSION, "customer_id": customer_id, "campaigns": campaigns}
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
-# NEW: Year-to-Date endpoint
+# YEAR-TO-DATE REPORT
 # ---------------------------
 @router.get("/report-ytd")
 def report_ytd(
@@ -296,10 +205,8 @@ def report_ytd(
             include_zero_impressions=include_zero_impressions,
         )
         if not result.get("ok", False):
-            # normalize error passthrough to client
             raise HTTPException(status_code=400, detail=result.get("error"))
 
-        # usage logging
         log_api_usage(
             scope_id=customer_id,
             request_id=result.get("request_id"),
@@ -307,13 +214,21 @@ def report_ytd(
             request_type="search",
             operations=0,
         )
+        # run_ytd_report already used the pinned version via search_stream()
+        result.setdefault("api_version", _API_VERSION)
         return result
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------------------
+# KEYWORD IDEAS
+# ---------------------------
 @router.get("/keyword-ideas")
 def keyword_ideas(
     customer_id: str,
@@ -351,7 +266,6 @@ def keyword_ideas(
         elif seed_list:
             req.keyword_seed.keywords.extend(seed_list)
         else:
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="Provide at least one of: seed or url")
 
         resp = svc.generate_keyword_ideas(request=req)
@@ -371,14 +285,27 @@ def keyword_ideas(
                 "high_top_of_page_bid": micros_to_currency(getattr(metrics, "high_top_of_page_bid_micros", 0)),
             })
 
-        log_api_usage(scope_id=customer_id, request_id=None, endpoint="/ads/keyword-ideas", request_type="list", operations=0)
-        return {"customer_id": customer_id, "geo": geo_ids, "language": lang,
-                "network": "GOOGLE_SEARCH" if kp_network == kp_enum.GOOGLE_SEARCH else "GOOGLE_SEARCH_AND_PARTNERS",
-                "count": len(out), "ideas": out}
+        log_api_usage(
+            scope_id=customer_id,
+            request_id=None,
+            endpoint="/ads/keyword-ideas",
+            request_type="list",
+            operations=0,
+        )
+        return {
+            "api_version": _API_VERSION,
+            "customer_id": customer_id,
+            "geo": geo_ids,
+            "language": lang,
+            "network": "GOOGLE_SEARCH" if kp_network == kp_enum.GOOGLE_SEARCH else "GOOGLE_SEARCH_AND_PARTNERS",
+            "count": len(out),
+            "ideas": out,
+        }
     except GoogleAdsException as e:
-        errors = [{"code": err.error_code.WhichOneof("error_code"), "message": err.message} for err in e.failure.errors]
-        from fastapi import HTTPException
+        errors = [
+            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
         raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
     except Exception as e:
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(e))

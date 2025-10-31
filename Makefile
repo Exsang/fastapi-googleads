@@ -1,4 +1,13 @@
-# ----- Variables -----
+# Default network config (fallback if .env is missing or unset)
+HOST ?= 0.0.0.0
+PORT ?= 8000
+ENV_FILE ?= .env
+
+# Make sure we use bash and inherit the environment
+SHELL := /bin/bash
+export
+
+# ----- Tool paths (ensure these are defined) -----
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 UVICORN := .venv/bin/uvicorn
@@ -6,101 +15,79 @@ BLACK := .venv/bin/black
 RUFF := .venv/bin/ruff
 PYTEST := .venv/bin/pytest
 
-APP := app.main:APP
-HOST ?= 0.0.0.0
-PORT ?= 8000
-ENV_FILE ?= .env
+# ----- Virtualenv + install helpers -----
+.PHONY: venv install bootstrap
 
-# ----- Phony -----
-.PHONY: help venv install bootstrap dev run reload test lint format fix check clean freeze
-
-# ----- Help -----
-help:
-	@echo "Targets:"
-	@echo "  make bootstrap    Create venv + install prod & dev deps"
-	@echo "  make venv         Create virtualenv at .venv"
-	@echo "  make install      Install requirements (+ requirements-dev.txt if present)"
-	@echo "  make dev          Run API with reload (Uvicorn) on $(HOST):$(PORT)"
-	@echo "  make run          Run API without reload"
-	@echo "  make reload       Alias of 'dev'"
-	@echo "  make test         Run pytest"
-	@echo "  make lint         Ruff static checks"
-	@echo "  make format       Black formatter"
-	@echo "  make fix          Ruff --fix + Black"
-	@echo "  make check        Lint + Test"
-	@echo "  make clean        Remove caches"
-	@echo "  make freeze       Write pinned deps to requirements.lock.txt"
-
-# ----- Env / install -----
 venv:
+	@echo "Creating virtual environment at .venv (if missing)…"
 	@test -d .venv || python -m venv .venv
-	@$(PIP) -q install --upgrade pip wheel setuptools
+	@.venv/bin/pip -q install --upgrade pip wheel setuptools
 
 install: venv
-	@$(PIP) -q install -r requirements.txt
-	@if [ -f requirements-dev.txt ]; then $(PIP) -q install -r requirements-dev.txt; fi
+	@echo "Installing requirements…"
+	@.venv/bin/pip -q install -r requirements.txt || true
+	@if [ -f requirements-dev.txt ]; then .venv/bin/pip -q install -r requirements-dev.txt; fi
 
-bootstrap: venv install
+bootstrap: install
 	@echo "Bootstrap complete ✅"
 
-# ----- Run -----
-dev:
-	@$(UVICORN) $(APP) --reload --host $(HOST) --port $(PORT) --env-file $(ENV_FILE)
+# ----- Dependency & env helpers -----
+.PHONY: ensure_deps ensure_tools doctor smoke
+
+ensure_deps: venv
+	@echo "Ensuring runtime deps in venv…"
+	@$(PIP) install -q -U \
+		fastapi uvicorn[standard] starlette watchfiles python-dotenv \
+		pydantic pydantic-settings \
+		google-ads grpcio grpcio-status protobuf \
+		sqlalchemy
+
+ensure_tools: venv
+	@echo "Ensuring dev tools in venv…"
+	@$(PIP) install -q -U ruff black pytest
+
+doctor: ensure_deps
+	@echo "Checking required env vars…"
+	@set -a; \
+	[[ -f .env ]] && source .env || true; \
+	set +a; \
+	printenv | grep -E 'GOOGLE_ADS_|LOGIN_CUSTOMER_ID' || true; \
+	$(PY) scripts/env_check.py || true; \
+	echo "Running CustomerService smoke test…"; \
+	$(PY) scripts/smoke.py
+
+smoke: ensure_deps
+	@$(PY) scripts/smoke.py
+
+# ----- Run / serve API -----
+.PHONY: dev run reload
+
+dev: ensure_uvicorn
+	@echo "Starting FastAPI server with reload on $(HOST):$(PORT)…"
+	@$(UVICORN) $(APP) --reload --host $(HOST) --port $(PORT) --env-file $(ENV_FILE) --proxy-headers
+
+# ----- Ensure runtime deps -----
+.PHONY: ensure_uvicorn ensure_deps ensure_tools doctor dev
+
+# Create venv if missing
+venv:
+	@echo "Creating virtual environment at .venv (if missing)…"
+	@test -d .venv || python -m venv .venv
+	@.venv/bin/pip -q install --upgrade pip wheel setuptools
+
+# Ensure uvicorn and FastAPI exist
+ensure_uvicorn: venv
+	@echo "Ensuring uvicorn and FastAPI runtime deps…"
+	@.venv/bin/pip install -q -U uvicorn fastapi starlette watchfiles python-dotenv
+
+# ----- Run development server -----
+dev: ensure_uvicorn
+	@echo "Starting FastAPI server with reload on $(HOST):$(PORT)…"
+	@.venv/bin/uvicorn app.main:APP --reload --host $(HOST) --port $(PORT) --env-file $(ENV_FILE) --proxy-headers
+
+
+run: ensure_deps
+	@echo "Starting FastAPI server (no reload)…"
+	@$(UVICORN) app.main:APP --host $(HOST) --port $(PORT) --env-file .env --proxy-headers
 
 reload: dev
-
-run:
-	@$(UVICORN) $(APP) --host $(HOST) --port $(PORT) --env-file $(ENV_FILE)
-
-# ----- Quality -----
-test:
-	@$(PYTEST) -q
-
-lint:
-	@$(RUFF) check .
-
-format:
-	@$(BLACK) .
-
-fix:
-	@$(RUFF) check . --fix
-	@$(BLACK) .
-
-check: lint test
-
-# ----- Utilities -----
-clean:
-	@find . -type d -name "__pycache__" -exec rm -rf {} + || true
-	@rm -rf .pytest_cache .ruff_cache .mypy_cache || true
-	@echo "Clean complete 🧹"
-
-freeze:
-	@$(PIP) freeze > requirements.lock.txt
-	@echo "Wrote requirements.lock.txt"
-
-PID_FILE := .codespace/api.pid
-LOG_FILE := logs/api.log
-
-.PHONY: stop restart logs
-
-stop:
-	@if [ -f $(PID_FILE) ]; then \
-		PID=$$(cat $(PID_FILE)); \
-		if ps -p $$PID >/dev/null 2>&1; then \
-			echo "Stopping API (PID $$PID)"; \
-			kill $$PID || true; \
-			sleep 1; \
-		fi; \
-		rm -f $(PID_FILE); \
-	else \
-		echo "No PID file found; nothing to stop."; \
-	fi
-
-restart: stop
-	@$(MAKE) dev
-
-logs:
-	@mkdir -p logs
-	@echo "Tailing $(LOG_FILE) (Ctrl+C to exit)"; \
-	touch $(LOG_FILE); \
-	tail -f $(LOG_FILE)

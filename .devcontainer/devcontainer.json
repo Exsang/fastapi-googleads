@@ -5,21 +5,26 @@
       "version": "3.12"
     }
   },
-  "forwardPorts": [
-    8000
-  ],
+  "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
       "label": "FastAPI",
       "onAutoForward": "openBrowser"
     }
   },
-  "postCreateCommand": "bash .devcontainer/postCreate.sh",
+  "remoteEnv": {
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
   "customizations": {
     "vscode": {
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python",
-        "editor.formatOnSave": true
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+        "python.terminal.activateEnvironment": true,
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter"
+        }
       },
       "extensions": [
         "ms-python.python",
@@ -31,5 +36,6 @@
       ]
     }
   },
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
   "postStartCommand": "bash .devcontainer/postStart.sh"
 }

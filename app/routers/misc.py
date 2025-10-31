@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pathlib import Path
+from urllib.parse import urlunsplit  # ✅ for robust base URL build
 import re
 import json
+import os
 
 from ..deps.auth import require_auth
 from ..settings import settings, DEFAULT_MCC_ID
@@ -11,12 +13,71 @@ from ..services.usage_log import dashboard_stats
 
 router = APIRouter(tags=["misc"])
 
+# --- Diagnostic route: show active env vars (safely masked) ---
+import os
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/env", include_in_schema=False)
+def show_env():
+    """Diagnostic route to verify Codespace secrets and .env values."""
+    keys = [
+        "GOOGLE_ADS_DEVELOPER_TOKEN",
+        "GOOGLE_ADS_CLIENT_ID",
+        "GOOGLE_ADS_CLIENT_SECRET",
+        "GOOGLE_ADS_REFRESH_TOKEN",
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
+        "LOGIN_CUSTOMER_ID",
+        "PUBLIC_BASE_URL",
+    ]
+    result = {}
+    for k in keys:
+        val = os.getenv(k, "")
+        if val:
+            # Mask sensitive values
+            if len(val) > 12:
+                val = val[:6] + "..." + val[-4:]
+        result[k] = val or "<unset>"
+    return result
+
+
+# ---------- helpers ----------
+def _external_base(request: Request) -> str:
+    """
+    Compute the external base URL with this precedence:
+      1) settings.PUBLIC_BASE_URL (explicit override)
+      2) X-Forwarded-* headers (behind proxies: Codespaces/ngrok/load balancers)
+      3) request.base_url (last resort)
+    """
+    # 1) explicit override wins
+    if settings.PUBLIC_BASE_URL:
+        return settings.PUBLIC_BASE_URL.rstrip("/")
+
+    # 2) reconstruct from common proxy headers
+    h = request.headers
+    proto = (h.get("x-forwarded-proto") or h.get("x-scheme") or request.url.scheme or "http").split(",")[0].strip()
+    host  = (h.get("x-forwarded-host")  or h.get("host")       or (request.url.hostname or "localhost")).split(",")[0].strip()
+    port  = (h.get("x-forwarded-port")  or "").split(",")[0].strip()
+    pref  = (h.get("x-forwarded-prefix") or "").split(",")[0].strip()
+
+    # append port if provided and non-default
+    if port and (":" not in host) and not ((proto == "http" and port == "80") or (proto == "https" and port == "443")):
+        host = f"{host}:{port}"
+
+    # normalize prefix to start with /
+    if pref and not pref.startswith("/"):
+        pref = "/" + pref
+
+    # urlunsplit: (scheme, netloc, path, query, fragment)
+    return urlunsplit((proto, host, pref, "", "")).rstrip("/")
+
+
 # ---------------------------
 # Basic health
 # ---------------------------
 @router.get("/health")
 def health():
-    import os
     key_status = "enabled" if os.getenv("DASH_API_KEY") else "disabled"
     return {
         "ok": True,
@@ -30,7 +91,7 @@ def health():
 # ---------------------------
 @router.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 def home(request: Request):
-    base = str(request.base_url).rstrip("/")
+    base = _external_base(request)  # ✅ dynamic base
     stats = dashboard_stats(DEFAULT_MCC_ID)
 
     def fmt(n):
@@ -157,7 +218,7 @@ def home(request: Request):
 @router.get("/_routes", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 def list_routes(request: Request):
     from fastapi.routing import APIRoute
-    base = str(request.base_url).rstrip("/")
+    base = _external_base(request)  # ✅ dynamic base
     rows = []
     for route in request.app.routes:
         if isinstance(route, APIRoute):
@@ -207,8 +268,9 @@ def debug_env_file():
 
 # ---------------------------
 # ENVIRONMENT.md summary as JSON (secured)
+# NOTE: router is mounted at /misc in main.py, so this becomes /misc/env-summary
 # ---------------------------
-@router.get("/misc/env-summary", dependencies=[Depends(require_auth)])
+@router.get("/env-summary", dependencies=[Depends(require_auth)])
 def env_summary():
     """
     Parse ENVIRONMENT.md auto-generated block and return a structured JSON summary.
