@@ -10,9 +10,11 @@ from google.oauth2.credentials import Credentials  # noqa: F401  (kept for type 
 
 from ..settings import settings
 
-# Paths (reuse your existing settings locations)
-REFRESH_TOKEN_PATH = Path(settings.GOOGLE_ADS_REFRESH_TOKEN_FILE)
-REFRESH_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+# Optional file path (used only if explicitly set via env)
+_RAW_PATH = os.getenv("GOOGLE_ADS_REFRESH_TOKEN_FILE")
+REFRESH_TOKEN_PATH: Optional[Path] = Path(_RAW_PATH) if _RAW_PATH else None
+if REFRESH_TOKEN_PATH:
+    REFRESH_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _client_config_from_env() -> dict:
@@ -43,7 +45,7 @@ def build_flow(redirect_uri: str) -> Flow:
     Create an OAuth2 Flow using env-provided client_id/secret and a runtime redirect URI.
     The redirect_uri should be the full URL to /auth/callback on the current host.
     """
-    # Ensure no yaml path interferes
+    # Ensure no google-ads.yaml path interferes with env-driven config
     os.environ.pop("GOOGLE_ADS_CONFIGURATION_FILE", None)
 
     client_config = _client_config_from_env()
@@ -55,20 +57,26 @@ def build_flow(redirect_uri: str) -> Flow:
 
 
 def save_refresh_token(token: str) -> None:
-    """Persist the refresh token to the configured path."""
-    REFRESH_TOKEN_PATH.write_text(token.strip(), encoding="utf-8")
+    """
+    Persist the refresh token only if a file path is provided via
+    GOOGLE_ADS_REFRESH_TOKEN_FILE. In env-only mode, this is a no-op.
+    """
+    if REFRESH_TOKEN_PATH:
+        REFRESH_TOKEN_PATH.write_text(token.strip(), encoding="utf-8")
 
 
 def read_refresh_token() -> Optional[str]:
     """
-    Retrieve the saved refresh token; fall back to env var GOOGLE_ADS_REFRESH_TOKEN.
+    Retrieve the refresh token, preferring the environment variable
+    GOOGLE_ADS_REFRESH_TOKEN. If not present and a file path is configured,
+    read from that file.
     """
-    try:
-        txt = REFRESH_TOKEN_PATH.read_text(encoding="utf-8").strip()
-        if txt:
-            return txt
-    except FileNotFoundError:
-        pass
-
     env_val = os.getenv("GOOGLE_ADS_REFRESH_TOKEN", "").strip()
-    return env_val or None
+    if env_val:
+        return env_val
+
+    if REFRESH_TOKEN_PATH and REFRESH_TOKEN_PATH.exists():
+        txt = REFRESH_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        return txt or None
+
+    return None

@@ -13,6 +13,35 @@ from ..services.usage_log import dashboard_stats
 
 router = APIRouter(tags=["misc"])
 
+# --- Diagnostic route: show active env vars (safely masked) ---
+import os
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/env", include_in_schema=False)
+def show_env():
+    """Diagnostic route to verify Codespace secrets and .env values."""
+    keys = [
+        "GOOGLE_ADS_DEVELOPER_TOKEN",
+        "GOOGLE_ADS_CLIENT_ID",
+        "GOOGLE_ADS_CLIENT_SECRET",
+        "GOOGLE_ADS_REFRESH_TOKEN",
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
+        "LOGIN_CUSTOMER_ID",
+        "PUBLIC_BASE_URL",
+    ]
+    result = {}
+    for k in keys:
+        val = os.getenv(k, "")
+        if val:
+            # Mask sensitive values
+            if len(val) > 12:
+                val = val[:6] + "..." + val[-4:]
+        result[k] = val or "<unset>"
+    return result
+
+
 # ---------- helpers ----------
 def _external_base(request: Request) -> str:
     """
