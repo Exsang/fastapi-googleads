@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # App metadata
     # ----------------------------------------------------------------
     APP_TITLE: str = "Google Ads API Gateway"
-    APP_VERSION: str = os.getenv("APP_VERSION", "0.1.0")
+    APP_VERSION: str = os.getenv("APP_VERSION", "v0.2.0")
 
     # ----------------------------------------------------------------
     # Auth / API keys (env-only; use Codespaces secrets)
