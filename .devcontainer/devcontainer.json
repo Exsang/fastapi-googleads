@@ -1,9 +1,8 @@
 {
-  "name": "FastAPI + Google Ads (Codespace)",
+  "name": "fastapi-googleads (Codespaces)",
   "features": {
-    "ghcr.io/devcontainers/features/python:1": {
-      "version": "3.12"
-    }
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "forwardPorts": [8000],
   "portsAttributes": {
@@ -13,29 +12,42 @@
     }
   },
   "remoteEnv": {
+    "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+    "DASH_API_KEY": "${{ secrets.DASH_API_KEY }}",
+    "GOOGLE_ADS_DEVELOPER_TOKEN": "${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}",
+    "GOOGLE_ADS_CLIENT_ID": "${{ secrets.GOOGLE_CLIENT_ID }}",
+    "GOOGLE_ADS_CLIENT_SECRET": "${{ secrets.GOOGLE_CLIENT_SECRET }}",
+    "GOOGLE_ADS_REFRESH_TOKEN": "${{ secrets.GOOGLE_REFRESH_TOKEN }}",
+    "OPENAI_MODEL": "gpt-5",
+    "MCC_ID": "7414394764",
+    "LOGIN_CUSTOMER_ID": "7414394764"
+  },
+  "containerEnv": {
     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-    "PYTHONDONTWRITEBYTECODE": "1"
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1"
   },
   "customizations": {
     "vscode": {
-      "settings": {
-        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
-        "python.terminal.activateEnvironment": true,
-        "editor.formatOnSave": true,
-        "[python]": {
-          "editor.defaultFormatter": "ms-python.black-formatter"
-        }
-      },
       "extensions": [
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "charliermarsh.ruff",
-        "ms-python.black-formatter",
         "ms-toolsai.jupyter",
-        "github.vscode-github-actions"
-      ]
+        "ms-azuretools.vscode-docker",
+        "openai.codex",
+        "tamasfe.even-better-toml",
+        "ms-vscode.makefile-tools",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.analysis.typeCheckingMode": "basic",
+        "editor.formatOnSave": true
+      }
     }
   },
-  "postCreateCommand": "bash .devcontainer/postCreate.sh",
-  "postStartCommand": "bash .devcontainer/postStart.sh"
+  "onCreateCommand": "pip install --upgrade pip",
+  "postCreateCommand": "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi",
+  "postStartCommand": "git config --global --add safe.directory /workspaces/${containerWorkspaceFolderBasename} || true && if command -v gp >/dev/null 2>&1 && [ -n \"${CODESPACE_NAME:-}\" ]; then gp open \"https://${CODESPACE_NAME}-8000.app.github.dev/misc/?key=local-dev-key\"; fi",
+  "updateRemoteUserUID": true
 }

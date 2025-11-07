@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pathlib import Path
-from urllib.parse import urlunsplit  # ✅ for robust base URL build
+from urllib.parse import urlunsplit
 import re
 import json
 import os
@@ -11,35 +13,8 @@ from ..settings import settings, DEFAULT_MCC_ID
 from ..services.oauth import read_refresh_token
 from ..services.usage_log import dashboard_stats
 
-router = APIRouter(tags=["misc"])
-
-# --- Diagnostic route: show active env vars (safely masked) ---
-import os
-from fastapi import APIRouter
-
-router = APIRouter()
-
-@router.get("/env", include_in_schema=False)
-def show_env():
-    """Diagnostic route to verify Codespace secrets and .env values."""
-    keys = [
-        "GOOGLE_ADS_DEVELOPER_TOKEN",
-        "GOOGLE_ADS_CLIENT_ID",
-        "GOOGLE_ADS_CLIENT_SECRET",
-        "GOOGLE_ADS_REFRESH_TOKEN",
-        "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
-        "LOGIN_CUSTOMER_ID",
-        "PUBLIC_BASE_URL",
-    ]
-    result = {}
-    for k in keys:
-        val = os.getenv(k, "")
-        if val:
-            # Mask sensitive values
-            if len(val) > 12:
-                val = val[:6] + "..." + val[-4:]
-        result[k] = val or "<unset>"
-    return result
+# All endpoints under /misc/*
+router = APIRouter(prefix="/misc", tags=["misc"])
 
 
 # ---------- helpers ----------
@@ -47,29 +22,24 @@ def _external_base(request: Request) -> str:
     """
     Compute the external base URL with this precedence:
       1) settings.PUBLIC_BASE_URL (explicit override)
-      2) X-Forwarded-* headers (behind proxies: Codespaces/ngrok/load balancers)
+      2) X-Forwarded-* headers (behind proxies)
       3) request.base_url (last resort)
     """
-    # 1) explicit override wins
     if settings.PUBLIC_BASE_URL:
         return settings.PUBLIC_BASE_URL.rstrip("/")
 
-    # 2) reconstruct from common proxy headers
     h = request.headers
     proto = (h.get("x-forwarded-proto") or h.get("x-scheme") or request.url.scheme or "http").split(",")[0].strip()
     host  = (h.get("x-forwarded-host")  or h.get("host")       or (request.url.hostname or "localhost")).split(",")[0].strip()
     port  = (h.get("x-forwarded-port")  or "").split(",")[0].strip()
     pref  = (h.get("x-forwarded-prefix") or "").split(",")[0].strip()
 
-    # append port if provided and non-default
     if port and (":" not in host) and not ((proto == "http" and port == "80") or (proto == "https" and port == "443")):
         host = f"{host}:{port}"
 
-    # normalize prefix to start with /
     if pref and not pref.startswith("/"):
         pref = "/" + pref
 
-    # urlunsplit: (scheme, netloc, path, query, fragment)
     return urlunsplit((proto, host, pref, "", "")).rstrip("/")
 
 
@@ -86,12 +56,46 @@ def health():
         "login_customer_id": os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None,
     }
 
+
+# ---------------------------
+# ENV (masked) — diagnostics
+# ---------------------------
+@router.get("/env", include_in_schema=False)
+def show_env():
+    """Diagnostic route to verify Codespaces secrets and env values (masked)."""
+    keys = [
+        "GOOGLE_ADS_DEVELOPER_TOKEN",
+        "GOOGLE_ADS_CLIENT_ID",
+        "GOOGLE_ADS_CLIENT_SECRET",
+        "GOOGLE_ADS_REFRESH_TOKEN",
+        "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
+        "LOGIN_CUSTOMER_ID",
+        "PUBLIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "DASH_API_KEY",
+    ]
+    result = {}
+    for k in keys:
+        val = os.getenv(k, "")
+        if val:
+            if len(val) > 12:
+                val = val[:6] + "..." + val[-4:]
+        result[k] = val or "<unset>"
+    return result
+
+
 # ---------------------------
 # Home dashboard (secured)
 # ---------------------------
-@router.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
+from fastapi.responses import RedirectResponse
+
+@router.get("/", include_in_schema=False)
+async def misc_root():
+    return RedirectResponse(url="/misc/dashboard", status_code=303)
+
 def home(request: Request):
-    base = _external_base(request)  # ✅ dynamic base
+    base = _external_base(request)  # dynamic external base
     stats = dashboard_stats(DEFAULT_MCC_ID)
 
     def fmt(n):
@@ -143,10 +147,10 @@ def home(request: Request):
         "Usage & Debug": [
             ("View API usage log", f"{base}/ads/usage-log"),
             ("View API usage summary", f"{base}/ads/usage-summary"),
-            ("View loaded .env values", f"{base}/debug/env"),
-            ("ENVIRONMENT.md info", f"{base}/debug/env-file"),
+            ("View masked env (Codespaces)", f"{base}/misc/env"),
+            ("ENVIRONMENT.md info", f"{base}/misc/debug/env-file"),
             ("ENVIRONMENT.md summary (JSON)", f"{base}/misc/env-summary"),
-            ("All routes (auto-list)", f"{base}/_routes"),
+            ("All routes (auto-list)", f"{base}/misc/_routes"),
         ],
         "Docs": [
             ("Interactive Swagger UI", f"{base}/docs"),
@@ -212,13 +216,14 @@ def home(request: Request):
 """
     return HTMLResponse(html)
 
+
 # ---------------------------
 # Routes listing (secured)
 # ---------------------------
 @router.get("/_routes", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 def list_routes(request: Request):
     from fastapi.routing import APIRoute
-    base = _external_base(request)  # ✅ dynamic base
+    base = _external_base(request)
     rows = []
     for route in request.app.routes:
         if isinstance(route, APIRoute):
@@ -239,6 +244,7 @@ def list_routes(request: Request):
     html.append("</table></body></html>")
     return HTMLResponse("".join(html))
 
+
 # ---------------------------
 # Debug env (safe preview)
 # ---------------------------
@@ -246,14 +252,15 @@ def list_routes(request: Request):
 def debug_env():
     """Preview core runtime env/config info (safe to print)."""
     dt = settings.GOOGLE_ADS_DEVELOPER_TOKEN
-    login = settings.GOOGLE_ADS_LOGIN_CUSTOMER_ID
+    login = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
     return {
         "dev_token_preview": f"{dt[:6]}...{dt[-4:]}" if dt else None,
         "login_customer_id": login or None,
         "get_cap": settings.BASIC_DAILY_GET_REQUEST_LIMIT,
         "ops_cap": settings.BASIC_DAILY_OPERATION_LIMIT,
-        "source": ".env override=True",
+        "source": "env (Codespaces secrets preferred)",
     }
+
 
 # ---------------------------
 # ENVIRONMENT.md metadata
@@ -266,9 +273,9 @@ def debug_env_file():
     size = p.stat().st_size if exists else 0
     return {"ok": exists, "path": str(p), "size_bytes": size}
 
+
 # ---------------------------
 # ENVIRONMENT.md summary as JSON (secured)
-# NOTE: router is mounted at /misc in main.py, so this becomes /misc/env-summary
 # ---------------------------
 @router.get("/env-summary", dependencies=[Depends(require_auth)])
 def env_summary():
@@ -329,7 +336,8 @@ def env_summary():
         except json.JSONDecodeError:
             return None
 
-    settings_json = extract_json_block("Settings snapshot \(selected\)")
+    # NOTE: pass the literal title; re.escape() handles parentheses safely.
+    settings_json = extract_json_block("Settings snapshot (selected)")
     versions = extract_json_block("Package versions")
 
     # Folder tree
@@ -347,3 +355,151 @@ def env_summary():
         "versions": versions,
         "folder_tree": folder_tree,
     }
+
+# --- add (or ensure) these imports exist near the top ---
+from fastapi import Request
+from fastapi.responses import HTMLResponse
+import os
+import html
+
+# --- add this NEW endpoint ---
+@router.get("/dashboard", response_class=HTMLResponse)
+async def misc_dashboard(request: Request):
+    """
+    Minimal HTML dashboard that:
+      - Accepts Authorization header OR ?key=<DASH_API_KEY>
+      - Shows health, usage, and customers count
+      - Uses fetch() to call your own API endpoints
+    """
+    dash_key = os.environ.get("DASH_API_KEY")
+    if not dash_key:
+        return HTMLResponse("<h3>Server missing DASH_API_KEY</h3>", status_code=500)
+
+    # Accept either header bearer token or ?key= token
+    header = request.headers.get("authorization") or request.headers.get("Authorization")
+    query_key = request.query_params.get("key")
+    client_token = None
+    if header and header.lower().startswith("bearer "):
+        client_token = header.split(" ", 1)[1].strip()
+    elif query_key:
+        client_token = query_key.strip()
+
+    # Render HTML; JS will attach the token and fetch stats
+    # (show a subtle warning if no token was provided)
+    warn = "" if client_token else "<em>Provide ?key=… or use Authorization header to load protected stats.</em>"
+
+    # Escape token in HTML just to be safe (we only stash it in JS)
+    safe_token = html.escape(client_token or "")
+
+    return HTMLResponse(f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Customer Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {{
+      --bg:#0b1220; --fg:#e6edf3; --muted:#94a3b8; --card:#111827; --border:#1f2937; --accent:#93c5fd;
+    }}
+    body {{ margin:0; background:var(--bg); color:var(--fg); font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; }}
+    .topbar {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); background:#0f172a; }}
+    .chip {{ background:var(--card); border:1px solid var(--border); border-radius:12px; padding:6px 10px; }}
+    .chip b {{ color:var(--accent); }}
+    .wrap {{ max-width:1100px; margin:20px auto; padding:0 16px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }}
+    .card {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; }}
+    input[type=text] {{ width:320px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:10px; padding:6px 8px; }}
+    button {{ background:var(--card); color:var(--fg); border:1px solid var(--border); border-radius:10px; padding:6px 10px; cursor:pointer; }}
+    a, a:visited {{ color:var(--accent); text-decoration:none; }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="chip">📦 <b id="appTitle">Google API Backend</b></div>
+    <div class="chip">🩺 Health: <b id="healthVal">…</b></div>
+    <div class="chip">📈 24h Usage: <b id="usageVal">—</b></div>
+    <div class="chip">👥 Customers: <b id="custVal">—</b></div>
+    <span style="flex:1"></span>
+    <input id="apiKey" type="text" placeholder="Paste DASH_API_KEY…" />
+    <button id="saveKey">Use key</button>
+  </div>
+
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin:6px 0 8px">Quick Links</h3>
+        <ul style="margin:0; padding-left:18px; line-height:1.8">
+          <li><a href="/docs" target="_blank">Swagger UI</a></li>
+          <li><a href="/misc/env-summary" target="_blank">Env Summary</a></li>
+          <li><a href="/ops/fs?path=&depth=2" target="_blank">Repo Browser (JSON)</a></li>
+        </ul>
+        <p style="color:var(--muted); margin-top:10px;">{warn}</p>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:6px 0 8px">Notes</h3>
+        <p style="color:var(--muted);">This page pulls data from:</p>
+        <ul style="margin:0; padding-left:18px; line-height:1.8; color:var(--muted);">
+          <li><code>/health</code> (no auth)</li>
+          <li><code>/usage/summary</code> (requires API key)</li>
+          <li><code>/ads/customers</code> (requires API key)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Prefer key from URL (?key=...), then localStorage, then server-injected
+    const url = new URL(window.location.href);
+    const qpKey = url.searchParams.get('key') || '';
+    const lsKey = window.localStorage.getItem('DASH_API_KEY') || '';
+    const injected = "{safe_token}";
+    const token = qpKey || injected || lsKey;
+
+    // Populate input if present
+    const input = document.getElementById('apiKey');
+    if (input) input.value = token || '';
+
+    // Save button
+    const btn = document.getElementById('saveKey');
+    if (btn) btn.addEventListener('click', () => {{
+      const val = (document.getElementById('apiKey').value || '').trim();
+      if (val) {{
+        window.localStorage.setItem('DASH_API_KEY', val);
+        location.href = window.location.pathname + '?key=' + encodeURIComponent(val);
+      }}
+    }});
+
+    // Simple GET helper that adds Authorization header if token exists
+    async function getJSON(path) {{
+      const headers = token ? {{ 'Authorization': 'Bearer ' + token }} : {{}};
+      const res = await fetch(path, {{ headers }});
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + path);
+      return res.json();
+    }}
+
+    // Load Health
+    getJSON('/health').then(d => {{
+      document.getElementById('healthVal').textContent = (d && d.status) || 'ok';
+    }}).catch(_ => {{
+      document.getElementById('healthVal').textContent = 'error';
+    }});
+
+    // Load Usage
+    getJSON('/usage/summary').then(d => {{
+      const v = d.requests_24h ?? d.requests ?? JSON.stringify(d);
+      document.getElementById('usageVal').textContent = v;
+    }}).catch(_ => {{
+      document.getElementById('usageVal').textContent = 'unauth';
+    }});
+
+    // Load Customers count
+    getJSON('/ads/customers').then(d => {{
+      const n = Array.isArray(d) ? d.length : (d.customers?.length || 0);
+      document.getElementById('custVal').textContent = n;
+    }}).catch(_ => {{
+      document.getElementById('custVal').textContent = 'unauth';
+    }});
+  </script>
+</body>
+</html>""")
