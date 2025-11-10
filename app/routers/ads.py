@@ -12,15 +12,19 @@ from ..services.google_ads import (
     search_stream,
     micros_to_currency,
     run_ytd_report,
+    run_mtd_campaign_report,
+    run_mtd_level_report,
     _API_VERSION,  # kept for returning in payloads/logging only
 )
-from ..services.usage_log import log_api_usage
+from ..services.usage_log import record_quota_event
 
 router = APIRouter(tags=["ads"], dependencies=[Depends(require_auth)])
 
 # ---------------------------
 # CUSTOMERS
 # ---------------------------
+
+
 @router.get("/customers")
 def list_customers():
     try:
@@ -28,26 +32,33 @@ def list_customers():
         svc = client.get_service("CustomerService")
         resp = svc.list_accessible_customers()
         ids = [rn.split("/")[-1] for rn in resp.resource_names]
-        log_api_usage(
-            scope_id="global",
-            request_id=getattr(resp, "request_id", None),
-            endpoint="/ads/customers",
-            request_type="list",
-            operations=0,
-        )
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id="global", request_id=getattr(
+                resp, "request_id", None), endpoint="/ads/customers")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id="global", request_id=getattr(
+                resp, "request_id", None), endpoint="/ads/customers")
+        except Exception:
+            pass
         return {"api_version": _API_VERSION, "customers": ids}
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
 # EXAMPLE REPORT
 # ---------------------------
+
+
 @router.get("/example-report")
 def example_report(customer_id: str):
     try:
@@ -60,30 +71,41 @@ def example_report(customer_id: str):
             LIMIT 10
         """
         req = client.get_type("SearchGoogleAdsRequest")
-        req.customer_id = customer_id
-        req.query = query
+        req.customer_id = customer_id  # type: ignore[attr-defined]
+        req.query = query  # type: ignore[attr-defined]
         rows = ga.search(request=req)
-        items = [{"id": r.campaign.id, "name": r.campaign.name, "status": r.campaign.status.name} for r in rows]
-        log_api_usage(
-            scope_id=customer_id,
-            request_id=getattr(rows, "request_id", None),
-            endpoint="/ads/example-report",
-            request_type="search",
-            operations=0,
-        )
+        items = [{
+            "id": r.campaign.id,
+            "name": r.campaign.name,
+            "status": r.campaign.status.name if hasattr(r.campaign.status, "name") else str(r.campaign.status),
+        } for r in rows]
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id, request_id=getattr(
+                rows, "request_id", None), endpoint="/ads/example-report")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=customer_id, request_id=getattr(
+                rows, "request_id", None), endpoint="/ads/example-report")
+        except Exception:
+            pass
         return {"api_version": _API_VERSION, "campaigns": items}
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
 # ACTIVE ACCOUNTS
 # ---------------------------
+
+
 @router.get("/active-accounts")
 def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool = False):
     try:
@@ -113,7 +135,8 @@ def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool
         items = []
         for r in resp:
             cc = r.customer_client
-            cid = cc.client_customer.split("/")[-1] if cc.client_customer else str(cc.id)
+            cid = cc.client_customer.split(
+                "/")[-1] if cc.client_customer else str(cc.id)
             items.append({
                 "customer_id": cid,
                 "name": cc.descriptive_name,
@@ -125,13 +148,16 @@ def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool
                 "level": cc.level,
             })
 
-        log_api_usage(
-            scope_id=mcc_id,
-            request_id=getattr(resp, "request_id", None),
-            endpoint="/ads/active-accounts",
-            request_type="search",
-            operations=0,
-        )
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=mcc_id, request_id=getattr(
+                resp, "request_id", None), endpoint="/ads/active-accounts")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=mcc_id, request_id=getattr(
+                resp, "request_id", None), endpoint="/ads/active-accounts")
+        except Exception:
+            pass
         return {
             "api_version": _API_VERSION,
             "mcc_id": mcc_id,
@@ -141,16 +167,20 @@ def list_active_accounts(mcc_id: str = DEFAULT_MCC_ID, include_submanagers: bool
         }
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
 # 30-DAY REPORT
 # ---------------------------
+
+
 @router.get("/report-30d")
 def report_30d(customer_id: str):
     try:
@@ -182,16 +212,20 @@ def report_30d(customer_id: str):
         return {"api_version": _API_VERSION, "customer_id": customer_id, "campaigns": campaigns}
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
 # YEAR-TO-DATE REPORT
 # ---------------------------
+
+
 @router.get("/report-ytd")
 def report_ytd(
     customer_id: str,
@@ -207,28 +241,119 @@ def report_ytd(
         if not result.get("ok", False):
             raise HTTPException(status_code=400, detail=result.get("error"))
 
-        log_api_usage(
-            scope_id=customer_id,
-            request_id=result.get("request_id"),
-            endpoint="/ads/report-ytd",
-            request_type="search",
-            operations=0,
-        )
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id,
+                               request_id=result.get("request_id"), endpoint="/ads/report-ytd")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=customer_id,
+                               request_id=result.get("request_id"), endpoint="/ads/report-ytd")
+        except Exception:
+            pass
         # run_ytd_report already used the pinned version via search_stream()
         result.setdefault("api_version", _API_VERSION)
         return result
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------
+# MONTH-TO-DATE CAMPAIGN REPORT
+# ---------------------------
+
+
+@router.get("/report-mtd-campaigns")
+def report_mtd_campaigns(
+    customer_id: str,
+    include_zero_impressions: bool = False,
+):
+    try:
+        result = run_mtd_campaign_report(
+            customer_id=customer_id,
+            include_zero_impressions=include_zero_impressions,
+        )
+        if not result.get("ok", False):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id, request_id=result.get(
+                "request_id"), endpoint="/ads/report-mtd-campaigns")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=customer_id, request_id=result.get(
+                "request_id"), endpoint="/ads/report-mtd-campaigns")
+        except Exception:
+            pass
+        result.setdefault("api_version", _API_VERSION)
+        return result
+    except GoogleAdsException as e:
+        errors = [
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------
+# MONTH-TO-DATE (GENERIC LEVEL)
+# ---------------------------
+
+
+@router.get("/report-mtd")
+def report_mtd(
+    customer_id: str,
+    level: Literal["campaign", "ad_group", "ad", "keyword"] = "campaign",
+    include_zero_impressions: bool = False,
+):
+    try:
+        result = run_mtd_level_report(
+            customer_id=customer_id,
+            level=level,
+            include_zero_impressions=include_zero_impressions,
+        )
+        if not result.get("ok", False):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id,
+                               request_id=result.get("request_id"), endpoint="/ads/report-mtd")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=customer_id,
+                               request_id=result.get("request_id"), endpoint="/ads/report-mtd")
+        except Exception:
+            pass
+        result.setdefault("api_version", _API_VERSION)
+        return result
+    except GoogleAdsException as e:
+        errors = [
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
 # KEYWORD IDEAS
 # ---------------------------
+
+
 @router.get("/keyword-ideas")
 def keyword_ideas(
     customer_id: str,
@@ -244,29 +369,36 @@ def keyword_ideas(
         lang_path = f"languageConstants/{int(lang)}"
         geo_ids = [g.strip() for g in geo.split(",") if g.strip()]
         geo_paths = [f"geoTargetConstants/{int(g)}" for g in geo_ids]
+        # type: ignore[attr-defined]
         kp_enum = client.enums.KeywordPlanNetworkEnum.KeywordPlanNetwork
-        kp_network = kp_enum.GOOGLE_SEARCH if network.lower() == "google" else kp_enum.GOOGLE_SEARCH_AND_PARTNERS
+        kp_network = kp_enum.GOOGLE_SEARCH if network.lower(
+        ) == "google" else kp_enum.GOOGLE_SEARCH_AND_PARTNERS
 
         svc = client.get_service("KeywordPlanIdeaService")
         req = client.get_type("GenerateKeywordIdeasRequest")
-        req.customer_id = customer_id
-        req.language = lang_path
-        req.geo_target_constants.extend(geo_paths)
-        req.keyword_plan_network = kp_network
+        req.customer_id = customer_id  # type: ignore[attr-defined]
+        req.language = lang_path  # type: ignore[attr-defined]
+        req.geo_target_constants.extend(
+            geo_paths)  # type: ignore[attr-defined]
+        req.keyword_plan_network = kp_network  # type: ignore[attr-defined]
 
         seed_list: list[str] = []
         if seed:
-            seed_list = [s.replace("+", " ").strip() for s in seed.split(",") if s.strip()]
+            seed_list = [s.replace("+", " ").strip()
+                         for s in seed.split(",") if s.strip()]
 
         if seed_list and url:
-            req.keyword_and_url_seed.url = url
-            req.keyword_and_url_seed.keywords.extend(seed_list)
+            req.keyword_and_url_seed.url = url  # type: ignore[attr-defined]
+            req.keyword_and_url_seed.keywords.extend(
+                seed_list)  # type: ignore[attr-defined]
         elif url:
-            req.url_seed.url = url
+            req.url_seed.url = url  # type: ignore[attr-defined]
         elif seed_list:
-            req.keyword_seed.keywords.extend(seed_list)
+            req.keyword_seed.keywords.extend(
+                seed_list)  # type: ignore[attr-defined]
         else:
-            raise HTTPException(status_code=400, detail="Provide at least one of: seed or url")
+            raise HTTPException(
+                status_code=400, detail="Provide at least one of: seed or url")
 
         resp = svc.generate_keyword_ideas(request=req)
         out = []
@@ -285,13 +417,16 @@ def keyword_ideas(
                 "high_top_of_page_bid": micros_to_currency(getattr(metrics, "high_top_of_page_bid_micros", 0)),
             })
 
-        log_api_usage(
-            scope_id=customer_id,
-            request_id=None,
-            endpoint="/ads/keyword-ideas",
-            request_type="list",
-            operations=0,
-        )
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id,
+                               request_id=None, endpoint="/ads/keyword-ideas")
+        except Exception:
+            pass
+        try:
+            record_quota_event("google_ads", "requests", 1, scope_id=customer_id,
+                               request_id=None, endpoint="/ads/keyword-ideas")
+        except Exception:
+            pass
         return {
             "api_version": _API_VERSION,
             "customer_id": customer_id,
@@ -303,9 +438,11 @@ def keyword_ideas(
         }
     except GoogleAdsException as e:
         errors = [
-            {"code": err.error_code.WhichOneof("error_code"), "message": err.message}
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
             for err in e.failure.errors
         ]
-        raise HTTPException(status_code=400, detail={"request_id": e.request_id, "errors": errors})
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

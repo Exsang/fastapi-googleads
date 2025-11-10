@@ -1,4 +1,7 @@
 from __future__ import annotations
+import html
+from fastapi import Request
+from fastapi.responses import RedirectResponse
 
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -29,10 +32,12 @@ def _external_base(request: Request) -> str:
         return settings.PUBLIC_BASE_URL.rstrip("/")
 
     h = request.headers
-    proto = (h.get("x-forwarded-proto") or h.get("x-scheme") or request.url.scheme or "http").split(",")[0].strip()
-    host  = (h.get("x-forwarded-host")  or h.get("host")       or (request.url.hostname or "localhost")).split(",")[0].strip()
-    port  = (h.get("x-forwarded-port")  or "").split(",")[0].strip()
-    pref  = (h.get("x-forwarded-prefix") or "").split(",")[0].strip()
+    proto = (h.get("x-forwarded-proto") or h.get("x-scheme")
+             or request.url.scheme or "http").split(",")[0].strip()
+    host = (h.get("x-forwarded-host") or h.get("host")
+            or (request.url.hostname or "localhost")).split(",")[0].strip()
+    port = (h.get("x-forwarded-port") or "").split(",")[0].strip()
+    pref = (h.get("x-forwarded-prefix") or "").split(",")[0].strip()
 
     if port and (":" not in host) and not ((proto == "http" and port == "80") or (proto == "https" and port == "443")):
         host = f"{host}:{port}"
@@ -88,11 +93,12 @@ def show_env():
 # ---------------------------
 # Home dashboard (secured)
 # ---------------------------
-from fastapi.responses import RedirectResponse
+
 
 @router.get("/", include_in_schema=False)
 async def misc_root():
     return RedirectResponse(url="/misc/dashboard", status_code=303)
+
 
 def home(request: Request):
     base = _external_base(request)  # dynamic external base
@@ -136,25 +142,45 @@ def home(request: Request):
             ("Start OAuth flow", f"{base}/auth/start"),
             ("OAuth callback (for reference)", f"{base}/auth/callback"),
         ],
-        "Account & Ads Endpoints": [
-            ("List accessible customers", f"{base}/ads/customers"),
-            ("List example report", f"{base}/ads/example-report?customer_id={DEFAULT_MCC_ID}"),
-            ("List active accounts under MCC", f"{base}/ads/active-accounts?mcc_id={DEFAULT_MCC_ID}"),
-            ("30-day report", f"{base}/ads/report-30d?customer_id={DEFAULT_MCC_ID}"),
-            ("YTD report", f"{base}/ads/report-ytd?customer_id={DEFAULT_MCC_ID}"),
-            ("Keyword ideas", f"{base}/ads/keyword-ideas?customer_id={DEFAULT_MCC_ID}&seed=example"),
+        # Customer/ID dependent analytics & reports (pre-filled with default MCC where useful)
+        "Analytics & Reporting (CID scoped)": [
+            ("Example campaign list",
+             f"{base}/ads/example-report?customer_id={DEFAULT_MCC_ID}"),
+            ("Active accounts under MCC",
+             f"{base}/ads/active-accounts?mcc_id={DEFAULT_MCC_ID}"),
+            ("30-day campaign performance",
+             f"{base}/ads/report-30d?customer_id={DEFAULT_MCC_ID}"),
+            ("Year-to-date performance",
+             f"{base}/ads/report-ytd?customer_id={DEFAULT_MCC_ID}"),
+            ("Keyword ideas (seed=example)",
+             f"{base}/ads/keyword-ideas?customer_id={DEFAULT_MCC_ID}&seed=example"),
+            ("Month-to-date (campaign)",
+             f"{base}/ads/report-mtd?customer_id={DEFAULT_MCC_ID}&level=campaign"),
+            ("Month-to-date (ad group)",
+             f"{base}/ads/report-mtd?customer_id={DEFAULT_MCC_ID}&level=ad_group"),
+            ("Month-to-date (ad)",
+             f"{base}/ads/report-mtd?customer_id={DEFAULT_MCC_ID}&level=ad"),
+            ("Month-to-date (keyword)",
+             f"{base}/ads/report-mtd?customer_id={DEFAULT_MCC_ID}&level=keyword"),
+            ("Launch multi-level analytics UI",
+             f"{base}/misc/analytics?customer_id={DEFAULT_MCC_ID}"),
         ],
-        "Usage & Debug": [
-            ("View API usage log", f"{base}/ads/usage-log"),
-            ("View API usage summary", f"{base}/ads/usage-summary"),
-            ("View masked env (Codespaces)", f"{base}/misc/env"),
-            ("ENVIRONMENT.md info", f"{base}/misc/debug/env-file"),
+        # Non-CID dashboards & introspection (fast navigation)
+        "Dashboards & Introspection (global)": [
+            ("Core dashboard (this page)", f"{base}/misc/dashboard"),
+            ("Health (JSON)", f"{base}/misc/health"),
+            ("Quota usage summary", f"{base}/ads/quota-summary"),
+            ("API usage log (CSV view)", f"{base}/ads/usage-log"),
+            ("API usage summary", f"{base}/ads/usage-summary"),
+            ("All routes (HTML)", f"{base}/misc/_routes"),
             ("ENVIRONMENT.md summary (JSON)", f"{base}/misc/env-summary"),
-            ("All routes (auto-list)", f"{base}/misc/_routes"),
+            ("ENVIRONMENT.md file info", f"{base}/misc/debug/env-file"),
+            ("Masked environment preview", f"{base}/misc/env"),
+            ("Repo file system explorer", f"{base}/ops/fs?path=&depth=2"),
         ],
         "Docs": [
-            ("Interactive Swagger UI", f"{base}/docs"),
-            ("ReDoc (alternative API docs)", f"{base}/redoc"),
+            ("Swagger UI", f"{base}/docs"),
+            ("ReDoc alternative docs", f"{base}/redoc"),
         ],
     }
 
@@ -178,7 +204,8 @@ def home(request: Request):
         </section>
         """
 
-    body = "".join(render_section(title, links) for title, links in pages.items())
+    body = "".join(render_section(title, links)
+                   for title, links in pages.items())
 
     html = f"""
 <!doctype html>
@@ -227,7 +254,8 @@ def list_routes(request: Request):
     rows = []
     for route in request.app.routes:
         if isinstance(route, APIRoute):
-            methods = ", ".join(sorted(m for m in route.methods if m in {"GET", "POST", "PUT", "DELETE", "PATCH"}))
+            methods = ", ".join(sorted(m for m in route.methods if m in {
+                                "GET", "POST", "PUT", "DELETE", "PATCH"}))
             path = route.path
             needs_params = "{" in path and "}" in path
             href = None if needs_params else f"{base}{path}"
@@ -240,7 +268,8 @@ def list_routes(request: Request):
     ]
     for methods, path, href in rows:
         link = f'<a href="{href}" target="_blank">{href}</a>' if href else "<span style='color:#888'>params required</span>"
-        html.append(f"<tr><td>{methods}</td><td><code>{path}</code></td><td>{link}</td></tr>")
+        html.append(
+            f"<tr><td>{methods}</td><td><code>{path}</code></td><td>{link}</td></tr>")
     html.append("</table></body></html>")
     return HTMLResponse("".join(html))
 
@@ -284,7 +313,8 @@ def env_summary():
     """
     p = Path(__file__).resolve().parents[2] / "ENVIRONMENT.md"
     if not p.exists():
-        raise HTTPException(status_code=404, detail="ENVIRONMENT.md not found at repo root.")
+        raise HTTPException(
+            status_code=404, detail="ENVIRONMENT.md not found at repo root.")
 
     md = p.read_text(encoding="utf-8")
     start = "<!-- BEGIN AUTO -->"
@@ -292,24 +322,29 @@ def env_summary():
     i = md.find(start)
     j = md.find(end)
     if i == -1 or j == -1 or j <= i:
-        raise HTTPException(status_code=422, detail="Auto-generated section not found in ENVIRONMENT.md.")
+        raise HTTPException(
+            status_code=422, detail="Auto-generated section not found in ENVIRONMENT.md.")
 
     block = md[i + len(start): j].strip()
 
     # 1) Header line: "_Generated at: **TIMESTAMP**  |  **BRANCH@COMMIT**_"
-    header_re = re.compile(r"_Generated at:\s+\*\*(.+?)\*\*\s+\|\s+\*\*(.+?)\*\*_")
+    header_re = re.compile(
+        r"_Generated at:\s+\*\*(.+?)\*\*\s+\|\s+\*\*(.+?)\*\*_")
     header_m = header_re.search(block)
     generated_at = header_m.group(1) if header_m else None
     git_tag = header_m.group(2) if header_m else None
 
     # Optional counts line
-    counts_re = re.compile(r"\*\*Routes:\*\*\s*(\d+).*\*\*Namespaces:\*\*\s*([^\n]+)")
+    counts_re = re.compile(
+        r"\*\*Routes:\*\*\s*(\d+).*\*\*Namespaces:\*\*\s*([^\n]+)")
     counts_m = counts_re.search(block)
     routes_count = int(counts_m.group(1)) if counts_m else None
-    namespaces = [s.strip() for s in counts_m.group(2).split(",")] if counts_m else []
+    namespaces = [s.strip()
+                  for s in counts_m.group(2).split(",")] if counts_m else []
 
     # Routes table
-    routes_section_re = re.compile(r"### Routes \(live\)\s*\n(.*?)\n\n###", re.DOTALL)
+    routes_section_re = re.compile(
+        r"### Routes \(live\)\s*\n(.*?)\n\n###", re.DOTALL)
     routes_sec = routes_section_re.search(block)
     routes = []
     if routes_sec:
@@ -341,7 +376,8 @@ def env_summary():
     versions = extract_json_block("Package versions")
 
     # Folder tree
-    tree_re = re.compile(r"### Folder tree \(depth 2\)\s*\n```(.*?)```", re.DOTALL)
+    tree_re = re.compile(
+        r"### Folder tree \(depth 2\)\s*\n```(.*?)```", re.DOTALL)
     tree_m = tree_re.search(block)
     folder_tree = tree_m.group(1).strip() if tree_m else None
 
@@ -356,13 +392,11 @@ def env_summary():
         "folder_tree": folder_tree,
     }
 
+
 # --- add (or ensure) these imports exist near the top ---
-from fastapi import Request
-from fastapi.responses import HTMLResponse
-import os
-import html
 
 # --- add this NEW endpoint ---
+
 @router.get("/dashboard", response_class=HTMLResponse)
 async def misc_dashboard(request: Request):
     """
@@ -376,7 +410,8 @@ async def misc_dashboard(request: Request):
         return HTMLResponse("<h3>Server missing DASH_API_KEY</h3>", status_code=500)
 
     # Accept either header bearer token or ?key= token
-    header = request.headers.get("authorization") or request.headers.get("Authorization")
+    header = request.headers.get(
+        "authorization") or request.headers.get("Authorization")
     query_key = request.query_params.get("key")
     client_token = None
     if header and header.lower().startswith("bearer "):
@@ -427,13 +462,43 @@ async def misc_dashboard(request: Request):
   <div class="wrap">
     <div class="grid">
       <div class="card">
-        <h3 style="margin:6px 0 8px">Quick Links</h3>
-        <ul style="margin:0; padding-left:18px; line-height:1.8">
-          <li><a href="/docs" target="_blank">Swagger UI</a></li>
-          <li><a href="/misc/env-summary" target="_blank">Env Summary</a></li>
-          <li><a href="/ops/fs?path=&depth=2" target="_blank">Repo Browser (JSON)</a></li>
-        </ul>
-        <p style="color:var(--muted); margin-top:10px;">{warn}</p>
+        <h3 style="margin:6px 0 8px">Global Dashboards & Tools</h3>
+        <p style="color:var(--muted); font-size:13px; margin:0 0 6px">Non-CID dependent endpoints grouped for fast navigation.</p>
+        <div style="display:grid; gap:10px;">
+          <div>
+            <h4 style="margin:4px 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);">System Health & Env</h4>
+            <ul style="margin:0; padding-left:18px; line-height:1.6">
+              <li><a href="/misc/dashboard" target="_blank">Core Dashboard</a></li>
+              <li><a href="/misc/health" target="_blank">Health (JSON)</a></li>
+              <li><a href="/misc/env" target="_blank">Masked Env Preview</a></li>
+              <li><a href="/misc/env-summary" target="_blank">ENVIRONMENT.md Summary (JSON)</a></li>
+              <li><a href="/misc/debug/env-file" target="_blank">ENVIRONMENT.md File Info</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4 style="margin:4px 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);">Usage & Quota</h4>
+            <ul style="margin:0; padding-left:18px; line-height:1.6">
+              <li><a href="/ads/usage-log" target="_blank">API Usage Log</a></li>
+              <li><a href="/ads/usage-summary" target="_blank">API Usage Summary</a></li>
+              <li><a href="/ads/quota-summary" target="_blank">Quota Usage Summary</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4 style="margin:4px 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);">Docs & Discovery</h4>
+            <ul style="margin:0; padding-left:18px; line-height:1.6">
+              <li><a href="/docs" target="_blank">Swagger UI</a></li>
+              <li><a href="/redoc" target="_blank">ReDoc Docs</a></li>
+              <li><a href="/misc/_routes" target="_blank">All Routes (HTML)</a></li>
+            </ul>
+          </div>
+          <div>
+            <h4 style="margin:4px 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);">Repository Tools</h4>
+            <ul style="margin:0; padding-left:18px; line-height:1.6">
+              <li><a href="/ops/fs?path=&depth=2" target="_blank">Repo Browser (JSON)</a></li>
+            </ul>
+          </div>
+        </div>
+        <p style="color:var(--muted); margin-top:10px; font-size:12px;">{warn}</p>
       </div>
 
       <div class="card">
@@ -445,22 +510,29 @@ async def misc_dashboard(request: Request):
           <li><code>/ads/customers</code> (requires API key)</li>
         </ul>
       </div>
+
+      <div class="card" style="grid-column: 1 / -1;">
+        <h3 style="margin:6px 0 8px">Deep Analytics</h3>
+        <p style="color:var(--muted); font-size:13px;">Launch a multi-level dashboard (campaign, ad group, ad, keyword) for a given Customer ID.</p>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
+          <input id="cidInput" type="text" placeholder="Enter Customer ID (e.g., 741-439-4764)" />
+          <button id="openAnalytics">Open Analytics</button>
+        </div>
+        <div id="anStatus" style="color:var(--muted); font-size:12px; margin-top:6px;">—</div>
+      </div>
     </div>
   </div>
 
   <script>
-    // Prefer key from URL (?key=...), then localStorage, then server-injected
     const url = new URL(window.location.href);
     const qpKey = url.searchParams.get('key') || '';
     const lsKey = window.localStorage.getItem('DASH_API_KEY') || '';
     const injected = "{safe_token}";
     const token = qpKey || injected || lsKey;
 
-    // Populate input if present
     const input = document.getElementById('apiKey');
     if (input) input.value = token || '';
 
-    // Save button
     const btn = document.getElementById('saveKey');
     if (btn) btn.addEventListener('click', () => {{
       const val = (document.getElementById('apiKey').value || '').trim();
@@ -470,7 +542,6 @@ async def misc_dashboard(request: Request):
       }}
     }});
 
-    // Simple GET helper that adds Authorization header if token exists
     async function getJSON(path) {{
       const headers = token ? {{ 'Authorization': 'Bearer ' + token }} : {{}};
       const res = await fetch(path, {{ headers }});
@@ -478,14 +549,12 @@ async def misc_dashboard(request: Request):
       return res.json();
     }}
 
-    // Load Health
     getJSON('/health').then(d => {{
       document.getElementById('healthVal').textContent = (d && d.status) || 'ok';
     }}).catch(_ => {{
       document.getElementById('healthVal').textContent = 'error';
     }});
 
-    // Load Usage
     getJSON('/usage/summary').then(d => {{
       const v = d.requests_24h ?? d.requests ?? JSON.stringify(d);
       document.getElementById('usageVal').textContent = v;
@@ -493,13 +562,132 @@ async def misc_dashboard(request: Request):
       document.getElementById('usageVal').textContent = 'unauth';
     }});
 
-    // Load Customers count
     getJSON('/ads/customers').then(d => {{
       const n = Array.isArray(d) ? d.length : (d.customers?.length || 0);
       document.getElementById('custVal').textContent = n;
     }}).catch(_ => {{
       document.getElementById('custVal').textContent = 'unauth';
     }});
+    
+    function normCID(s) {{ return (s || '').replace(/[^0-9]/g, ''); }}
+    document.getElementById('openAnalytics').addEventListener('click', () => {{
+      const cid = normCID(document.getElementById('cidInput').value);
+      if (!cid) {{ document.getElementById('anStatus').textContent = 'Enter a customer ID.'; return; }}
+      document.getElementById('anStatus').textContent = 'Opening…';
+      const url = '/misc/analytics?customer_id=' + encodeURIComponent(cid) + (token ? ('&key=' + encodeURIComponent(token)) : '');
+      window.open(url, '_blank');
+      setTimeout(() => {{ document.getElementById('anStatus').textContent = 'Opened analytics.'; }}, 600);
+    }});
+    document.getElementById('cidInput').addEventListener('keydown', (e) => {{ if (e.key === 'Enter') document.getElementById('openAnalytics').click(); }});
+  </script>
+</body>
+</html>""")
+
+
+@router.get("/analytics", response_class=HTMLResponse)
+async def misc_analytics(request: Request, customer_id: str, key: str | None = None):
+    """Multi-level analytics dashboard (campaign, ad group, ad, keyword)."""
+    token = key or request.query_params.get(
+        "key") or request.headers.get("authorization")
+    if token and token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1]
+    safe_token = html.escape(token or "")
+    cid_norm = ''.join(ch for ch in customer_id if ch.isdigit())
+    return HTMLResponse(f"""<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'/>
+  <title>Analytics — {cid_norm}</title>
+  <meta name='viewport' content='width=device-width,initial-scale=1'/>
+  <style>
+    body{{margin:0;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;background:#0b1220;color:#e6edf3}}a{{color:#93c5fd;text-decoration:none}}a:hover{{text-decoration:underline}}
+    header{{padding:14px 18px;background:#0f172a;border-bottom:1px solid #1f2937;display:flex;flex-wrap:wrap;align-items:center;gap:14px}}
+    .chip{{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:6px 12px;font-size:13px}}
+    main{{max-width:1200px;margin:20px auto;padding:0 18px}}
+    .tabs{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}}
+    .tab{{cursor:pointer;padding:8px 14px;border:1px solid #1f2937;border-radius:10px;background:#111827;font-size:13px}}
+    .tab.active{{background:#1e293b}}
+    table{{width:100%;border-collapse:collapse;font-size:13px}}
+    th,td{{padding:6px 8px;border-bottom:1px solid #1f2937;text-align:right}}
+    th:first-child,td:first-child{{text-align:left}}
+    #status{{font-size:12px;color:#94a3b8;margin:8px 0 4px}}
+    .controls{{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 6px}}
+    input[type=text]{{background:#0b1220;color:#e6edf3;border:1px solid #1f2937;border-radius:8px;padding:6px 8px;width:200px}}
+    label{{font-size:12px;color:#94a3b8;display:inline-flex;align-items:center;gap:4px}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class='chip'>📊 Analytics</div>
+    <div class='chip'>Customer: <b>{cid_norm}</b></div>
+    <div class='chip'>Token: <b>{'set' if safe_token else 'none'}</b></div>
+    <a class='chip' href='/misc/dashboard'>← Back</a>
+  </header>
+  <main>
+    <div class='controls'>
+      <input id='cidInput' value='{cid_norm}' placeholder='Customer ID'/>
+      <label><input id='incZero' type='checkbox'/> include zero impressions</label>
+      <button id='reloadBtn' class='tab'>Reload</button>
+    </div>
+    <div class='tabs'>
+      <div class='tab active' data-level='campaign'>Campaigns</div>
+      <div class='tab' data-level='ad_group'>Ad Groups</div>
+      <div class='tab' data-level='ad'>Ads</div>
+      <div class='tab' data-level='keyword'>Keywords</div>
+    </div>
+    <div id='status'>Ready.</div>
+    <div style='overflow:auto'>
+      <table id='dataTbl'>
+        <thead><tr id='hdrRow'></tr></thead>
+        <tbody id='bodyRows'></tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    const injectedToken = "{safe_token}";
+    let currentLevel = 'campaign';
+    function normCID(s) {{ return (s || '').replace(/[^0-9]/g,''); }}
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach(t => t.addEventListener('click', () => {{ tabs.forEach(x => x.classList.remove('active')); t.classList.add('active'); currentLevel = t.dataset.level; loadData(); }}));
+    document.getElementById('reloadBtn').addEventListener('click', loadData);
+    document.getElementById('cidInput').addEventListener('keydown', e => {{ if (e.key === 'Enter') loadData(); }});
+    function headersFor(level) {{
+      if (level === 'campaign') return ['Campaign','Impr','Clicks','Cost','Conv','Conv Value','Status'];
+      if (level === 'ad_group') return ['Ad Group','Campaign','Impr','Clicks','Cost','Conv','Conv Value','Status'];
+      if (level === 'ad') return ['Ad ID','Type','Ad Group','Campaign','Impr','Clicks','Cost','Conv','Conv Value','Status'];
+      if (level === 'keyword') return ['Keyword','Match','Ad Group','Campaign','Impr','Clicks','Cost','Conv','Conv Value','Status'];
+      return ['Item','Impr','Clicks','Cost'];
+    }}
+    function rowMap(level, r) {{
+      if (level === 'campaign') return [r.name || r.campaign_id, r.impressions || 0, r.clicks || 0, fmtCost(r.cost), fmtNum(r.conversions), fmtNum(r.conv_value), r.status || ''];
+      if (level === 'ad_group') return [r.ad_group_name || r.ad_group_id, r.campaign_name || r.campaign_id, r.impressions || 0, r.clicks || 0, fmtCost(r.cost), fmtNum(r.conversions), fmtNum(r.conv_value), r.status || ''];
+      if (level === 'ad') return [r.ad_id, r.ad_type || '', r.ad_group_name || r.ad_group_id, r.campaign_name || r.campaign_id, r.impressions || 0, r.clicks || 0, fmtCost(r.cost), fmtNum(r.conversions), fmtNum(r.conv_value), r.status || ''];
+      if (level === 'keyword') return [r.text || '', r.match_type || '', r.ad_group_name || r.ad_group_id, r.campaign_name || r.campaign_id, r.impressions || 0, r.clicks || 0, fmtCost(r.cost), fmtNum(r.conversions), fmtNum(r.conv_value), r.status || ''];
+      return [r.name || '', r.impressions || 0, r.clicks || 0, fmtCost(r.cost)];
+    }}
+    function fmtCost(v) {{ return (v || 0).toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}}); }}
+    function fmtNum(v) {{ return (v || 0).toLocaleString(); }}
+    async function loadData() {{
+      const cid = normCID(document.getElementById('cidInput').value);
+      if (!cid) {{ document.getElementById('status').textContent = 'Enter CID.'; return; }}
+      document.getElementById('status').textContent = 'Loading ' + currentLevel + '…';
+      const inc0 = document.getElementById('incZero').checked ? '&include_zero_impressions=true' : '';
+      const headers = injectedToken ? {{ 'Authorization': 'Bearer ' + injectedToken }} : {{}};
+      try {{
+        const resp = await fetch(`/ads/report-mtd?customer_id=${{cid}}&level=${{currentLevel}}${{inc0}}`, {{ headers }});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const rows = data.rows || [];
+        const hdrs = headersFor(currentLevel);
+        const hdrRow = document.getElementById('hdrRow');
+        hdrRow.innerHTML = '';
+        hdrs.forEach(h => {{ const th = document.createElement('th'); th.textContent = h; hdrRow.appendChild(th); }});
+        const body = document.getElementById('bodyRows'); body.innerHTML = '';
+        rows.forEach(r => {{ const tr = document.createElement('tr'); const cols = rowMap(currentLevel, r); cols.forEach((c, i) => {{ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }}); body.appendChild(tr); }});
+        document.getElementById('status').textContent = `${{rows.length}} row(s)`;
+      }} catch (err) {{ document.getElementById('status').textContent = 'Error loading data'; }}
+    }}
+    loadData();
   </script>
 </body>
 </html>""")

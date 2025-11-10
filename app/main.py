@@ -1,12 +1,15 @@
 # app/main.py
 from __future__ import annotations
+from starlette.responses import RedirectResponse
+from app.routers import googleads_proxy
+from fastapi.responses import RedirectResponse
 
 import os
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse, HTMLResponse
 
@@ -40,6 +43,8 @@ logging.basicConfig(
 # ---------------------------------------------------------------------
 # Lifespan (startup/shutdown)
 # ---------------------------------------------------------------------
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting FastAPI + Google Ads service")
@@ -58,7 +63,8 @@ async def lifespan(app: FastAPI):
 
     # Helpful hint for Assist API
     if not os.environ.get("OPENAI_API_KEY"):
-        logger.warning("OPENAI_API_KEY is not set; /assist/chat will return an auth/config error.")
+        logger.warning(
+            "OPENAI_API_KEY is not set; /assist/chat will return an auth/config error.")
 
     yield  # --- Application runs here ---
 
@@ -81,7 +87,8 @@ __all__ = ["APP"]
 # CORS (liberal defaults for dev; tighten in prod)
 # ---------------------------------------------------------------------
 cors_origins = os.environ.get("FASTAPI_CORS_ORIGINS", "*")
-allow_origins = [o.strip() for o in cors_origins.split(",")] if cors_origins else ["*"]
+allow_origins = [o.strip() for o in cors_origins.split(",")
+                 ] if cors_origins else ["*"]
 
 APP.add_middleware(
     CORSMiddleware,
@@ -99,34 +106,36 @@ APP.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 # ---------------------------------------------------------------------
 # Basic routes
 # ---------------------------------------------------------------------
+
+
 @APP.get("/health")
 def health():
     return {"status": "ok"}
 # app/main.py (add right below your existing /health)
+
+
 @APP.head("/health")
 def health_head():
     return {}
 
 
-# Use an HTML forward instead of HTTP redirect to avoid Codespaces adding ':8000'
+# ---------------------------------------------------------------------
+# Root redirect to login page
+# ---------------------------------------------------------------------
 @APP.get("/", include_in_schema=False)
-def root():
-    return HTMLResponse(
-        """<!doctype html>
-<html><head>
-<meta http-equiv="refresh" content="0; url=/misc">
-<title>Redirecting…</title>
-</head>
-<body>
-<p>Redirecting to <a href="/misc">/misc</a>…</p>
-<script>location.replace("/misc");</script>
-</body></html>""",
-        status_code=200,
-    )
+async def root_redirect(request: Request):
+    """
+    Redirect root to the login page, which shows auth status and quick links.
+    After authentication, users can navigate to /misc/dashboard.
+    """
+    return RedirectResponse(url="/auth/login-page", status_code=303)
+
 
 # ---------------------------------------------------------------------
 # Router registration (DEFERRED IMPORTS to avoid circular imports)
 # ---------------------------------------------------------------------
+
+
 def _register_routers() -> None:
     """
     Import routers only after APP is created to avoid circular-import issues.
@@ -144,13 +153,15 @@ def _register_routers() -> None:
     # Include core routers
     APP.include_router(auth_router, prefix="/auth", tags=["auth"])
     APP.include_router(ads_router, prefix="/ads", tags=["google-ads"])
-    APP.include_router(usage_router, prefix="/usage", tags=["usage"])
+    # usage_router already declares prefix="/ads"; include without extra prefix
+    APP.include_router(usage_router)
     APP.include_router(misc_router)  # misc defines its own prefix="/misc"
 
     # Optional/extended routers (keep each import isolated to avoid cycles)
     try:
         from app.routers import assist
-        APP.include_router(assist.router)  # defines its own prefix (e.g., "/assist")
+        # defines its own prefix (e.g., "/assist")
+        APP.include_router(assist.router)
     except Exception as e:
         logger.warning("Skipping assist router due to import error: %s", e)
 
@@ -172,17 +183,29 @@ def _register_routers() -> None:
         from app.routers import ops_archive
         APP.include_router(ops_archive.router)  # prefix "/ops"
     except Exception as e:
-        logger.warning("Skipping ops_archive router due to import error: %s", e)
+        logger.warning(
+            "Skipping ops_archive router due to import error: %s", e)
+
+    # DB ops (Neon connectivity tests)
+    try:
+        from app.routers import ops_db
+        APP.include_router(ops_db.router)
+    except Exception as e:
+        logger.warning("Skipping ops_db router due to import error: %s", e)
+
+    # ETL endpoints (secured)
+    try:
+        from app.routers import etl
+        APP.include_router(etl.router)
+    except Exception as e:
+        logger.warning("Skipping etl router due to import error: %s", e)
+
 
 # Register at import time
 _register_routers()
 
-from fastapi.responses import RedirectResponse
 
-# Redirect site root → dashboard
-@APP.get("/", include_in_schema=False)
-async def root_redirect():
-    return RedirectResponse(url="/misc/dashboard", status_code=303)
-
-from app.routers import googleads_proxy
+# Proxy router included after main registration
 APP.include_router(googleads_proxy.router, prefix="/proxy", tags=["proxy"])
+
+# Note: root "/" route defined earlier redirects to /login-page for secure access flow

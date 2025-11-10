@@ -4,9 +4,11 @@ uvicorn[standard]==0.30.1
 starlette==0.38.6
 python-dotenv==1.0.1
 pydantic==2.9.2
-pydantic-settings==2.3.4
+pydantic-settings>=2.0,<3
 typing_extensions==4.15.0
 SQLAlchemy==2.0.35
+psycopg[binary]==3.2.3
+alembic==1.13.3
 
 # ---- Google Ads / Auth ----
 google-ads==28.3.0

@@ -1,0 +1,5 @@
+[project]
+dependencies = [
+    # ...existing dependencies...
+    "pydantic-settings>=2.0,<3",
+]

@@ -45,6 +45,8 @@ secrets/
 .vscode/
 *.csv
 *.pid
+_exports/
+api_usage_log.csv
 .venv/
 __pycache__/
 *.pyc
