@@ -9,6 +9,7 @@ typing_extensions==4.15.0
 SQLAlchemy==2.0.35
 psycopg[binary]==3.2.3
 alembic==1.13.3
+pgvector==0.2.5
 
 # ---- Google Ads / Auth ----
 google-ads==28.3.0

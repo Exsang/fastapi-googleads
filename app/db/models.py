@@ -1,6 +1,10 @@
 # app/db/models.py
 from __future__ import annotations
-from sqlalchemy import Column, Date, String, BigInteger, Float, JSON, TIMESTAMP, Text
+from sqlalchemy import Column, Date, String, BigInteger, Float, JSON, TIMESTAMP, Text, Integer
+try:
+    from pgvector.sqlalchemy import Vector  # type: ignore
+except Exception:  # pragma: no cover
+    Vector = None  # type: ignore
 from sqlalchemy.sql import func
 from .base import Base
 
@@ -115,3 +119,31 @@ class QuotaUsage(Base):
     request_id = Column(String, nullable=True)
     endpoint = Column(String, nullable=True)
     extra = Column(JSON, nullable=True)
+
+
+# Embeddings store (for GPT retrieval / RAG)
+class Embedding(Base):
+    __tablename__ = "embedding"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    provider = Column(String(64), index=True)  # e.g. 'openai'
+    model = Column(String(128), index=True)
+    # campaign|ad_group|ad|keyword|prompt|doc
+    entity_type = Column(String(32), index=True)
+    entity_id = Column(String(128), index=True, nullable=True)
+    scope_id = Column(String(64), index=True,
+                      nullable=True)  # MCC/CID or 'global'
+    title = Column(String(512), nullable=True)
+    text = Column(Text)  # source content (may be chunk)
+    # sha256(content) for idempotency
+    text_hash = Column(String(64), index=True)
+    # ordering for chunked content
+    chunk_index = Column(Integer, nullable=True)
+    meta = Column(JSON, nullable=True)  # JSON metadata (metrics, tags)
+    # Vector column (dimension fixed by chosen embedding model, e.g., 1536 for text-embedding-3-small)
+    # Use pgvector Vector when available (Postgres). Under SQLite dev fallback, store JSON array in 'embedding_json'.
+    if Vector is not None:
+        embedding = Column(Vector(1536))  # type: ignore[arg-type]
+    else:  # pragma: no cover
+        embedding = Column(JSON)
+    dim = Column(Integer, default=1536)
+    ts = Column(TIMESTAMP, server_default=func.now(), index=True)

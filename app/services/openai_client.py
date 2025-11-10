@@ -1,17 +1,24 @@
 # app/services/openai_client.py
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional, Any
 import asyncio
-from openai import AsyncOpenAI
+try:
+    from openai import AsyncOpenAI, OpenAI  # type: ignore
+except Exception:  # pragma: no cover
+    AsyncOpenAI = None  # type: ignore
+    OpenAI = None  # type: ignore
 from app.settings import settings
 from .usage_log import record_quota_event
+import hashlib
 
-# Single client for app lifetime
-_client: Optional[AsyncOpenAI] = None
+# Single client for app lifetime (typed as Any for compatibility in dev without openai)
+_client: Any | None = None
 
 
-def get_client() -> AsyncOpenAI:
+def get_client() -> Any:
     global _client
     if _client is None:
+        if AsyncOpenAI is None:
+            raise RuntimeError("openai package not available")
         _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     return _client
 
@@ -139,3 +146,42 @@ async def stream_chat(
                 break
 
     await asyncio.sleep(0)
+
+
+# ---------- Embeddings (synchronous) ----------
+
+def embed_texts(texts: List[str], model: Optional[str] = None) -> Dict[str, Any]:
+    """Generate embeddings for a list of texts.
+
+    Returns { model, data:[{index, embedding, text}], usage:{prompt_tokens} }
+    Records approximate input token usage to quota tracking.
+    """
+    model = model or settings.OPENAI_EMBEDDING_MODEL if hasattr(
+        settings, 'OPENAI_EMBEDDING_MODEL') else 'text-embedding-3-small'
+    if not texts:
+        return {"model": model, "data": [], "usage": {}}
+    if OpenAI is None or not getattr(settings, 'OPENAI_API_KEY', None):
+        # Dev fallback: zero vectors
+        dim = 1536
+        return {"model": model, "data": [{"index": i, "embedding": [0.0]*dim, "text": t} for i, t in enumerate(texts)], "usage": {}}
+    client = OpenAI(api_key=getattr(
+        settings, 'OPENAI_API_KEY', None))  # type: ignore
+    resp = client.embeddings.create(model=model, input=texts)  # type: ignore
+    prompt_tokens = getattr(resp, 'usage', {}).get(
+        'prompt_tokens', sum(len(t.split()) for t in texts))
+    try:
+        record_quota_event('openai', 'input_tokens', int(
+            prompt_tokens or 0), endpoint='embeddings.create', extra={'model': model})
+        record_quota_event('openai', 'requests', 1,
+                           endpoint='embeddings.create', extra={'model': model})
+    except Exception:
+        pass
+    data_out = []
+    for i, item in enumerate(getattr(resp, 'data', [])):
+        emb = getattr(item, 'embedding', [])
+        data_out.append({"index": i, "embedding": emb, "text": texts[i]})
+    return {"model": model, "data": data_out, "usage": {"prompt_tokens": prompt_tokens}}
+
+
+def hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
