@@ -12,11 +12,14 @@ from ..services.google_ads import (
     search_stream,
     micros_to_currency,
     run_ytd_report,
+    run_ytd_daily_campaign_report,
     run_mtd_campaign_report,
     run_mtd_level_report,
     _API_VERSION,  # kept for returning in payloads/logging only
 )
 from ..services.usage_log import record_quota_event
+from ..db.session import get_db
+from sqlalchemy.orm import Session
 
 router = APIRouter(tags=["ads"], dependencies=[Depends(require_auth)])
 
@@ -222,7 +225,7 @@ def report_30d(customer_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------
-# YEAR-TO-DATE REPORT
+# YEAR-TO-DATE REPORT (AGGREGATED)
 # ---------------------------
 
 
@@ -251,7 +254,6 @@ def report_ytd(
                                request_id=result.get("request_id"), endpoint="/ads/report-ytd")
         except Exception:
             pass
-        # run_ytd_report already used the pinned version via search_stream()
         result.setdefault("api_version", _API_VERSION)
         return result
     except GoogleAdsException as e:
@@ -264,6 +266,117 @@ def report_ytd(
                             "request_id": e.request_id, "errors": errors})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------
+# YEAR-TO-DATE DAILY (CAMPAIGN) with persistence
+# ---------------------------
+
+
+@router.get("/report-ytd-daily")
+def report_ytd_daily(
+    customer_id: str,
+    include_zero_impressions: bool = False,
+    format: Literal["json", "csv"] = "json",
+    source: Literal["auto", "db", "live"] = "auto",
+    fill_missing: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Year-to-date daily campaign metrics.
+
+    source:
+      auto -> prefer DB (AdsDailyPerf); fallback to live API if empty
+      db   -> only DB (no API calls); optionally fill missing days if fill_missing
+      live -> always query Google Ads live (no persistence)
+
+    fill_missing: when True (and source auto/db) we ingest missing campaign days Jan1..today.
+    format: csv for spreadsheet usage, json otherwise.
+    """
+    try:
+        from datetime import date, timedelta
+        from sqlalchemy import select
+        from ..db.models import AdsDailyPerf
+        ingested_days: list[str] = []
+        if source in {"auto", "db"}:
+            today = date.today()
+            start = date(today.year, 1, 1)
+            stmt = (
+                select(AdsDailyPerf.perf_date)
+                .where(AdsDailyPerf.customer_id == customer_id)
+                .where(AdsDailyPerf.level == "campaign")
+                .where(AdsDailyPerf.perf_date >= start)
+                .where(AdsDailyPerf.perf_date <= today)
+                .distinct()
+            )
+            existing_dates = {d for d in db.execute(stmt).scalars().all()}
+            if fill_missing:
+                cur = start
+                from ..services.etl_google_ads import ingest_campaign_day
+                while cur <= today:
+                    if cur not in existing_dates:
+                        try:
+                            ingest_campaign_day(db, customer_id, cur)
+                            ingested_days.append(cur.isoformat())
+                        except Exception:
+                            pass
+                    cur += timedelta(days=1)
+                if ingested_days:
+                    db.commit()
+
+        result = run_ytd_daily_campaign_report(
+            customer_id=customer_id,
+            include_zero_impressions=include_zero_impressions,
+            source=source if source != "auto" else "auto",
+            db=db,
+        )
+        if not result.get("ok", False):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+
+        # Append ingestion metadata if we just filled days
+        if ingested_days:
+            result["ingested_days"] = ingested_days
+            result["ingested_count"] = len(ingested_days)
+
+        try:
+            record_quota_event("internal_api", "requests", 1, scope_id=customer_id,
+                               request_id=result.get("request_id"), endpoint="/ads/report-ytd-daily")
+        except Exception:
+            pass
+        if result.get("source") == "live":
+            try:
+                record_quota_event("google_ads", "requests", 1, scope_id=customer_id,
+                                   request_id=result.get("request_id"), endpoint="/ads/report-ytd-daily")
+            except Exception:
+                pass
+
+        result.setdefault("api_version", _API_VERSION)
+        if format == "csv":
+            import csv
+            import io
+            buf = io.StringIO()
+            writer = csv.DictWriter(
+                buf,
+                fieldnames=[
+                    "day", "campaign_id", "name", "status",
+                    "impressions", "clicks", "cost", "conversions", "conv_value",
+                ],
+            )
+            writer.writeheader()
+            for r in result.get("rows", []):
+                writer.writerow(r)
+            from fastapi import Response
+            return Response(content=buf.getvalue(), media_type="text/csv")
+        return result
+    except GoogleAdsException as e:
+        errors = [
+            {"code": err.error_code.WhichOneof(
+                "error_code"), "message": err.message}
+            for err in e.failure.errors
+        ]
+        raise HTTPException(status_code=400, detail={
+                            "request_id": e.request_id, "errors": errors})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ---------------------------
 # MONTH-TO-DATE CAMPAIGN REPORT
@@ -369,33 +482,34 @@ def keyword_ideas(
         lang_path = f"languageConstants/{int(lang)}"
         geo_ids = [g.strip() for g in geo.split(",") if g.strip()]
         geo_paths = [f"geoTargetConstants/{int(g)}" for g in geo_ids]
-        # type: ignore[attr-defined]
-        kp_enum = client.enums.KeywordPlanNetworkEnum.KeywordPlanNetwork
-        kp_network = kp_enum.GOOGLE_SEARCH if network.lower(
-        ) == "google" else kp_enum.GOOGLE_SEARCH_AND_PARTNERS
+
+        # Resolve enum network (fall back to integer values if symbolic missing)
+        kp_enum = getattr(client.enums, "KeywordPlanNetworkEnum", None)
+        KP_GOOGLE = getattr(kp_enum, "GOOGLE_SEARCH", 2) if kp_enum else 2
+        KP_GOOGLE_PARTNERS = getattr(
+            kp_enum, "GOOGLE_SEARCH_AND_PARTNERS", 3) if kp_enum else 3
+        kp_network = KP_GOOGLE if network.lower() == "google" else KP_GOOGLE_PARTNERS
 
         svc = client.get_service("KeywordPlanIdeaService")
         req = client.get_type("GenerateKeywordIdeasRequest")
-        req.customer_id = customer_id  # type: ignore[attr-defined]
-        req.language = lang_path  # type: ignore[attr-defined]
-        req.geo_target_constants.extend(
-            geo_paths)  # type: ignore[attr-defined]
-        req.keyword_plan_network = kp_network  # type: ignore[attr-defined]
+        req.customer_id = customer_id  # type: ignore
+        req.language = lang_path  # type: ignore
+        if hasattr(req, "geo_target_constants"):
+            req.geo_target_constants.extend(geo_paths)  # type: ignore
+        req.keyword_plan_network = kp_network  # type: ignore
 
         seed_list: list[str] = []
         if seed:
             seed_list = [s.replace("+", " ").strip()
                          for s in seed.split(",") if s.strip()]
 
-        if seed_list and url:
-            req.keyword_and_url_seed.url = url  # type: ignore[attr-defined]
-            req.keyword_and_url_seed.keywords.extend(
-                seed_list)  # type: ignore[attr-defined]
-        elif url:
-            req.url_seed.url = url  # type: ignore[attr-defined]
-        elif seed_list:
-            req.keyword_seed.keywords.extend(
-                seed_list)  # type: ignore[attr-defined]
+        if seed_list and url and hasattr(req, "keyword_and_url_seed"):
+            req.keyword_and_url_seed.url = url  # type: ignore
+            req.keyword_and_url_seed.keywords.extend(seed_list)  # type: ignore
+        elif url and hasattr(req, "url_seed"):
+            req.url_seed.url = url  # type: ignore
+        elif seed_list and hasattr(req, "keyword_seed"):
+            req.keyword_seed.keywords.extend(seed_list)  # type: ignore
         else:
             raise HTTPException(
                 status_code=400, detail="Provide at least one of: seed or url")
@@ -412,7 +526,7 @@ def keyword_ideas(
             out.append({
                 "idea": text,
                 "avg_monthly_searches": getattr(metrics, "avg_monthly_searches", None),
-                "competition": getattr(metrics.competition, "name", None) if getattr(metrics, "competition", None) else None,
+                "competition": getattr(getattr(metrics, "competition", None), "name", None) if getattr(metrics, "competition", None) else None,
                 "low_top_of_page_bid": micros_to_currency(getattr(metrics, "low_top_of_page_bid_micros", 0)),
                 "high_top_of_page_bid": micros_to_currency(getattr(metrics, "high_top_of_page_bid_micros", 0)),
             })
@@ -432,7 +546,7 @@ def keyword_ideas(
             "customer_id": customer_id,
             "geo": geo_ids,
             "language": lang,
-            "network": "GOOGLE_SEARCH" if kp_network == kp_enum.GOOGLE_SEARCH else "GOOGLE_SEARCH_AND_PARTNERS",
+            "network": "GOOGLE_SEARCH" if kp_network == KP_GOOGLE else "GOOGLE_SEARCH_AND_PARTNERS",
             "count": len(out),
             "ideas": out,
         }

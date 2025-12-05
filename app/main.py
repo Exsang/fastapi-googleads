@@ -8,6 +8,9 @@ import os
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
+import asyncio
+from datetime import datetime
+from sqlalchemy import text as _sql_text
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,9 +69,116 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "OPENAI_API_KEY is not set; /assist/chat will return an auth/config error.")
 
+    # ---------------------------------------------------------------
+    # Optional background re-embed freshness loop
+    # ---------------------------------------------------------------
+    try:
+        # local import to avoid early load
+        from app.services.embeddings import reembed_stale
+    except Exception:
+        reembed_stale = None  # type: ignore
+
+    reembed_enabled = os.getenv("REEMBED_ENABLED", "true").lower() in {
+        "1", "true", "yes"}
+    interval_minutes = int(os.getenv("REEMBED_INTERVAL_MINUTES", "0") or 0) or (
+        # default 6h
+        60 * int(os.getenv("REEMBED_INTERVAL_HOURS", "0") or 0)) or 360
+    reembed_limit = int(os.getenv("REEMBED_LIMIT", "150"))
+    reembed_entity_type = os.getenv("REEMBED_ENTITY_TYPE")  # optional filter
+    reembed_scope_id = os.getenv("REEMBED_SCOPE_ID")  # optional CID filter
+    max_age_hours = int(os.getenv("REEMBED_MAX_AGE_HOURS", "24"))
+
+    # ---------------------------------------------------------------
+    # Optional pgvector ANALYZE loop (index/statistics maintenance)
+    # ---------------------------------------------------------------
+    analyze_enabled = os.getenv("PGVECTOR_ANALYZE_ENABLED", "false").lower() in {
+        "1", "true", "yes"}
+    analyze_interval_minutes = int(os.getenv("PGVECTOR_ANALYZE_INTERVAL_MINUTES", "0") or 0) or (
+        # default daily
+        60 * int(os.getenv("PGVECTOR_ANALYZE_INTERVAL_HOURS", "0") or 0)) or 1440
+    analyze_reindex = os.getenv("PGVECTOR_ANALYZE_REINDEX", "false").lower() in {
+        "1", "true", "yes"}
+
+    async def _analyze_loop():
+        if not analyze_enabled:
+            logger.info("pgvector analyze loop disabled")
+            return
+        logger.info("Starting pgvector analyze loop: every %d min (reindex=%s)",
+                    analyze_interval_minutes, analyze_reindex)
+        try:
+            while True:
+                try:
+                    # Direct SQL; Postgres only. Silently skip on other dialects.
+                    from app.db.session import engine as _engine  # local import
+                    if _engine.dialect.name == "postgresql":
+                        with _engine.connect() as conn:
+                            conn = conn.execution_options(
+                                isolation_level="AUTOCOMMIT")
+                            conn.execute(_sql_text("ANALYZE embedding"))
+                            if analyze_reindex:
+                                try:
+                                    conn.execute(
+                                        _sql_text("REINDEX INDEX CONCURRENTLY IF EXISTS ix_embedding_vector_ivfflat"))
+                                except Exception as _re:
+                                    logger.warning(
+                                        "Analyze loop reindex error: %s", _re)
+                        logger.info("pgvector analyze tick %s (reindex=%s)",
+                                    datetime.utcnow().isoformat(), analyze_reindex)
+                    else:
+                        logger.info(
+                            "pgvector analyze tick skipped (dialect=%s)", _engine.dialect.name)
+                except Exception as e:
+                    logger.warning("Analyze loop error: %s", e)
+                await asyncio.sleep(analyze_interval_minutes * 60)
+        except asyncio.CancelledError:
+            logger.info("pgvector analyze loop cancelled")
+
+    async def _reembed_loop():
+        if not reembed_enabled or reembed_stale is None:
+            logger.info("Re-embed loop disabled (enabled=%s, available=%s)",
+                        reembed_enabled, bool(reembed_stale))
+            return
+        logger.info("Starting re-embed freshness loop: every %d min (limit=%d, max_age_hours=%d, entity_type=%s, scope_id=%s)",
+                    interval_minutes, reembed_limit, max_age_hours, reembed_entity_type, reembed_scope_id)
+        try:
+            while True:
+                try:
+                    summary = reembed_stale(
+                        max_age_hours=max_age_hours,
+                        limit=reembed_limit,
+                        entity_type=reembed_entity_type,
+                        scope_id=reembed_scope_id,
+                    ) if reembed_stale else {"ok": False, "error": "unavailable"}
+                    logger.info("Re-embed tick %s: %s",
+                                datetime.utcnow().isoformat(), summary)
+                except Exception as e:
+                    logger.warning("Re-embed loop error: %s", e)
+                await asyncio.sleep(interval_minutes * 60)
+        except asyncio.CancelledError:
+            logger.info("Re-embed loop cancelled")
+
+    if reembed_enabled and reembed_stale is not None:
+        app.state.reembed_task = asyncio.create_task(_reembed_loop())
+    else:
+        app.state.reembed_task = None
+
+    if analyze_enabled:
+        app.state.analyze_task = asyncio.create_task(_analyze_loop())
+    else:
+        app.state.analyze_task = None
+
     yield  # --- Application runs here ---
 
     logger.info("Shutting down FastAPI + Google Ads service")
+    # Cancel background task if running
+    for _tname in ("reembed_task", "analyze_task"):
+        task = getattr(app.state, _tname, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------
 # FastAPI app
@@ -199,6 +309,13 @@ def _register_routers() -> None:
         APP.include_router(etl.router)
     except Exception as e:
         logger.warning("Skipping etl router due to import error: %s", e)
+
+    # Agents endpoints (proposal/approval workflow)
+    try:
+        from app.routers import agents
+        APP.include_router(agents.router)
+    except Exception as e:
+        logger.warning("Skipping agents router due to import error: %s", e)
 
 
 # Register at import time

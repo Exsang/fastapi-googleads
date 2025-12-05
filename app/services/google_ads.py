@@ -252,6 +252,146 @@ def run_ytd_report(
     }
 
 
+# ------------------------------------------------------------------------------
+# Year-to-date DAILY campaign report (consolidated from legacy google_ads_reports.py)
+# ------------------------------------------------------------------------------
+
+def run_ytd_daily_campaign_report(
+    customer_id: str,
+    include_zero_impressions: bool = False,
+    source: str = "live",  # 'live' | 'db' | 'auto'
+    db: Any | None = None,
+) -> Dict[str, Any]:
+    """Return YTD daily metrics at the campaign level.
+
+    Shape:
+      {"ok": bool, "request_id": str|None, "rows": [ {"day": yyyy-mm-dd, "campaign_id": str,
+         "name": str, "status": str, impressions, clicks, cost, conversions, conv_value} ], "error"?: str}
+
+    This consolidates former functionality from:
+      - app/services/google_ads_reports.py (fetch_ytd_daily_from_google_ads)
+      - app/services/ytd_repo.py (ad-hoc persistence layer)
+
+    We intentionally do NOT persist these rows separately now; callers can export CSV directly.
+    Persistence should happen via the unified ETL pipeline instead of a bespoke ytd_daily table.
+    """
+    # DB-backed path: when source in {"db","auto"} and db provided, attempt assemble from AdsDailyPerf
+    if source in {"db", "auto"} and db is not None:
+        try:
+            from sqlalchemy import select
+            from datetime import date
+            from app.db.models import AdsDailyPerf, AdsCampaign
+            today = date.today()
+            start = date(today.year, 1, 1)
+            stmt = (
+                select(AdsDailyPerf, AdsCampaign)
+                .where(AdsDailyPerf.customer_id == customer_id)
+                .where(AdsDailyPerf.level == "campaign")
+                .where(AdsDailyPerf.perf_date >= start)
+                .where(AdsDailyPerf.perf_date <= today)
+                .join(AdsCampaign, AdsCampaign.campaign_id == AdsDailyPerf.campaign_id, isouter=True)
+                .order_by(AdsDailyPerf.perf_date.asc(), AdsDailyPerf.campaign_id.asc())
+            )
+            rows = db.execute(stmt).all()
+            out_rows: List[Dict[str, Any]] = []
+            for perf, camp in rows:
+                # Filter zero impressions if requested
+                if not include_zero_impressions and (perf.impressions or 0) <= 0:
+                    continue
+                out_rows.append({
+                    "day": perf.perf_date.isoformat(),
+                    "campaign_id": perf.campaign_id or None,
+                    "name": getattr(camp, "name", None),
+                    "status": getattr(camp, "status", None),
+                    "impressions": perf.impressions,
+                    "clicks": perf.clicks,
+                    "cost": micros_to_currency(perf.cost_micros or 0),
+                    "conversions": perf.conversions,
+                    "conv_value": perf.conversions_value,
+                })
+            # If source=='db' we return directly, even if empty
+            if source == "db" or (source == "auto" and out_rows):
+                return {
+                    "ok": True,
+                    "request_id": None,
+                    "rows": out_rows,
+                    "period": "THIS_YEAR",
+                    "granularity": "daily",
+                    "source": "db",
+                }
+        except Exception as _db_err:
+            if source == "db":
+                return {"ok": False, "error": f"DB path failed: {_db_err}"}
+            # fall through to live path for 'auto'
+
+    # Live path (fetch directly)
+    env_check = ensure_google_ads_env()
+    if not env_check["ok"]:
+        return {
+            "ok": False,
+            "error": f"Missing Google Ads env variables: {', '.join(env_check['missing'])}",
+            "missing": env_check["missing"],
+        }
+
+    try:
+        client = google_ads_client()
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"Client init failed: {e}"}
+
+    where_zero = "" if include_zero_impressions else "AND metrics.impressions > 0"
+
+    query = f"""
+        SELECT
+          segments.date,
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING THIS_YEAR
+        {where_zero}
+        ORDER BY segments.date ASC
+    """
+
+    try:
+        rows_iter, request_id = search_stream(client, customer_id, query)
+    except Exception as e:
+        return {"ok": False, "error": f"Query failed: {e}"}
+
+    out: List[Dict[str, Any]] = []
+    try:
+        for r in rows_iter:
+            day_val = getattr(r.segments, "date", None)
+            out.append({
+                "day": day_val,
+                "campaign_id": getattr(r.campaign, "id", None),
+                "name": getattr(r.campaign, "name", None),
+                "status": getattr(getattr(r.campaign, "status", ""), "name", str(getattr(r.campaign, "status", ""))),
+                "impressions": getattr(r.metrics, "impressions", 0),
+                "clicks": getattr(r.metrics, "clicks", 0),
+                "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
+                "conversions": getattr(r.metrics, "conversions", 0.0),
+                "conv_value": getattr(r.metrics, "conversions_value", 0.0),
+            })
+    except Exception as e:
+        return {"ok": False, "error": f"Row parse failed: {e}"}
+
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "rows": out,
+        "period": "THIS_YEAR",
+        "granularity": "daily",
+        "source": "live",
+    }
+
+
 def run_mtd_campaign_report(
     customer_id: str,
     include_zero_impressions: bool = False,
@@ -466,6 +606,72 @@ def run_mtd_level_report(
         return {"ok": False, "error": f"Row parse failed: {e}"}
 
     return {"ok": True, "request_id": request_id, "rows": out, "level": level, "period": "THIS_MONTH"}
+
+
+def run_search_terms_report(
+    customer_id: str,
+    days: int = 30,
+    include_zero_impressions: bool = False,
+) -> Dict[str, Any]:
+    """Return recent search terms with aggregated metrics over the last N days.
+
+    Response shape:
+      {"ok": bool, "request_id": str|None, "rows": [ {search_term, campaign_id, ad_group_id, impressions, clicks, cost, conversions, conv_value} ], "period": "LAST_N_DAYS"}
+    """
+    env_check = ensure_google_ads_env()
+    if not env_check["ok"]:
+        return {
+            "ok": False,
+            "error": f"Missing Google Ads env variables: {', '.join(env_check['missing'])}",
+            "missing": env_check["missing"],
+        }
+
+    try:
+        client = google_ads_client()
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"Client init failed: {e}"}
+
+    where_zero = "" if include_zero_impressions else "AND metrics.impressions > 0"
+    d = max(1, int(days or 1))
+    # GAQL macro for last N days
+    query = f"""
+      SELECT
+        search_term_view.search_term,
+        campaign.id,
+        ad_group.id,
+        metrics.impressions, metrics.clicks, metrics.cost_micros,
+        metrics.conversions, metrics.conversions_value
+      FROM search_term_view
+      WHERE segments.date DURING LAST_{d}_DAYS
+      {where_zero}
+    """
+
+    try:
+        rows_iter, request_id = search_stream(client, customer_id, query)
+    except Exception as e:
+        return {"ok": False, "error": f"Query failed: {e}"}
+
+    out: List[Dict[str, Any]] = []
+    try:
+        for r in rows_iter:
+            term = getattr(getattr(r, "search_term_view", None),
+                           "search_term", None)
+            out.append({
+                "search_term": term,
+                "campaign_id": getattr(r.campaign, "id", None),
+                "ad_group_id": getattr(r.ad_group, "id", None),
+                "impressions": getattr(r.metrics, "impressions", 0),
+                "clicks": getattr(r.metrics, "clicks", 0),
+                "cost": micros_to_currency(getattr(r.metrics, "cost_micros", 0)),
+                "conversions": getattr(r.metrics, "conversions", 0.0),
+                "conv_value": getattr(r.metrics, "conversions_value", 0.0),
+            })
+    except Exception as e:
+        return {"ok": False, "error": f"Row parse failed: {e}"}
+
+    return {"ok": True, "request_id": request_id, "rows": out, "period": f"LAST_{d}_DAYS"}
 
 
 # Ensure stable public API names expected elsewhere

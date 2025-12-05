@@ -11,6 +11,7 @@ from ..db.session import SessionLocal
 from ..db.models import Embedding
 from .openai_client import embed_texts, hash_text
 from .usage_log import record_quota_event
+from .google_ads import run_search_terms_report
 
 
 def _chunk_text(text: str, max_words: int = 800, overlap: int = 50) -> List[str]:
@@ -148,6 +149,73 @@ def upsert_embeddings_for_entity(
             db.close()
 
 
+def reembed_stale(
+    *,
+    max_age_hours: int = 24,
+    limit: int = 200,
+    model: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    force: bool = False,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    """Re-embed stale rows.
+
+    Staleness criteria:
+      - Row older than max_age_hours (ts)
+      - OR force=True
+    Optional filters: entity_type, scope_id.
+    Returns summary with counts and sample IDs.
+    """
+    from sqlalchemy import and_
+    close_after = False
+    if db is None:
+        db = SessionLocal()
+        close_after = True
+    try:
+        dialect = db.bind.dialect.name if db.bind is not None else "sqlite"
+        # Time threshold
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        filters = [Embedding.ts < cutoff] if not force else []
+        if entity_type:
+            filters.append(Embedding.entity_type == entity_type)
+        if scope_id:
+            filters.append(Embedding.scope_id == scope_id)
+        stmt = select(Embedding).where(
+            and_(*filters)) if filters else select(Embedding)
+        rows = db.execute(stmt.order_by(
+            Embedding.ts.asc()).limit(limit)).scalars().all()
+        if not rows:
+            return {"ok": True, "reembedded": 0, "skipped": 0, "total_candidates": 0, "sample_ids": []}
+        texts = [getattr(r, 'text', '') for r in rows]
+        resp = embed_texts(texts, model=model)
+        vecs = [d.get('embedding', []) for d in resp.get('data', [])]
+        reembedded = 0
+        sample: List[int] = []
+        for r, vec in zip(rows, vecs):
+            # update vector + metadata
+            setattr(r, 'embedding', vec)
+            setattr(r, 'model', resp.get('model'))
+            # refresh ts implicitly by setting a meta field version
+            meta = getattr(r, 'meta', {}) or {}
+            meta['reembed_ts'] = datetime.utcnow().isoformat() + 'Z'
+            setattr(r, 'meta', meta)
+            reembedded += 1
+            if len(sample) < 8:
+                sample.append(int(getattr(r, 'id', 0)))
+        db.commit()
+        try:
+            record_quota_event('openai', 'requests', 1, endpoint='embeddings.reembed', extra={
+                               'rows': reembedded})
+        except Exception:
+            pass
+        return {"ok": True, "reembedded": reembedded, "skipped": 0, "total_candidates": len(rows), "sample_ids": sample, "model": resp.get('model')}
+    finally:
+        if close_after:
+            db.close()
+
+
 def search_embeddings(
     *,
     q: str,
@@ -206,23 +274,111 @@ def search_embeddings(
         else:
             # Postgres + pgvector: use cosine distance
             # Order by ascending distance (smaller is better); compute score=1-dist for output
-            stmt = base.order_by(Embedding.embedding.cosine_distance(
-                q_emb)).limit(k)  # type: ignore[attr-defined]
-            rows = db.execute(stmt).scalars().all()
+            from sqlalchemy import select as _select, text as _text
+            import os
+            # Optional ivfflat.probes tuning via env (applies to current transaction scope)
+            try:
+                probes_env = int(os.getenv("VEC_IVFFLAT_PROBES", "0") or 0)
+                if probes_env > 0:
+                    db.execute(_text("SET LOCAL ivfflat.probes = :p"), {
+                               "p": probes_env})
+            except Exception:
+                pass
+            dist_expr = Embedding.embedding.cosine_distance(
+                q_emb)  # type: ignore[attr-defined]
+            stmt = _select(Embedding, dist_expr.label('dist')
+                           ).order_by(dist_expr.asc()).limit(k)
+            # Apply filters if present
+            if filters:
+                from sqlalchemy import and_ as _and
+                stmt = stmt.where(_and(*filters))
+            rows = db.execute(stmt).all()
             out: List[Retrieved] = []
-            for r in rows:
-                # No direct distance value returned here without select add; score approximated via recompute client-side if needed
+            for e, dist in rows:
+                try:
+                    # Convert distance to similarity-like score
+                    score = float(1.0 - float(dist))
+                except Exception:
+                    score = 0.0
                 out.append(Retrieved(
-                    id=int(getattr(r, 'id', 0) or 0),
-                    entity_type=str(getattr(r, 'entity_type', '') or ''),
-                    entity_id=getattr(r, 'entity_id', None),
-                    scope_id=getattr(r, 'scope_id', None),
-                    title=getattr(r, 'title', None),
-                    text=str(getattr(r, 'text', '') or ''),
-                    score=0.0,
-                    meta=getattr(r, 'meta', None),
+                    id=int(getattr(e, 'id', 0) or 0),
+                    entity_type=str(getattr(e, 'entity_type', '') or ''),
+                    entity_id=getattr(e, 'entity_id', None),
+                    scope_id=getattr(e, 'scope_id', None),
+                    title=getattr(e, 'title', None),
+                    text=str(getattr(e, 'text', '') or ''),
+                    score=score,
+                    meta=getattr(e, 'meta', None),
                 ))
             return out
     finally:
         if close_after:
             db.close()
+
+
+def backfill_search_terms_for_customer(
+    *,
+    customer_id: str,
+    days: int = 30,
+    limit: int | None = None,
+    model: Optional[str] = None,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    """Fetch recent search terms from Google Ads and upsert embeddings.
+
+    Returns { inserted: n, skipped: m, total_rows: t, sample_ids: [...], period: 'LAST_N_DAYS' }
+    """
+    # Query Google Ads for search terms
+    report = run_search_terms_report(customer_id, days=days)
+    if not report.get("ok"):
+        return {"ok": False, "error": report.get("error", "unknown error")}
+    rows = report.get("rows", [])
+    if limit is not None:
+        rows = rows[: max(0, int(limit))]
+    inserted = 0
+    skipped = 0
+    sample_ids: List[int] = []
+    for r in rows:
+        term = (r.get("search_term") or "").strip()
+        if not term:
+            skipped += 1
+            continue
+        # Deterministic entity_id for idempotency across runs
+        entity_id = "st:" + hash_text(f"{customer_id}|{term}")
+        title = term
+        # Compact source text with light metrics context
+        text = (
+            f"Search term: {term}. "
+            f"30d impressions: {r.get('impressions')}, clicks: {r.get('clicks')}, "
+            f"conversions: {r.get('conversions')}, conv_value: {r.get('conv_value')}, cost: {r.get('cost')} USD. "
+            f"Campaign: {r.get('campaign_id')}, Ad group: {r.get('ad_group_id')}"
+        )
+        meta = {
+            "campaign_id": r.get("campaign_id"),
+            "ad_group_id": r.get("ad_group_id"),
+            "period": report.get("period"),
+        }
+        ids = upsert_embeddings_for_entity(
+            entity_type="search_term",
+            entity_id=entity_id,
+            scope_id=customer_id,
+            title=title,
+            text=text,
+            model=model,
+            meta=meta,
+            db=db,
+        )
+        if ids:
+            inserted += 1
+            if len(sample_ids) < 5:
+                sample_ids.extend(ids)
+        else:
+            skipped += 1
+    try:
+        record_quota_event("internal_api", "requests", 1,
+                           scope_id=customer_id, endpoint="assist.backfill_search_terms")
+        record_quota_event("google_ads", "requests", 1,
+                           scope_id=customer_id, endpoint="search_term_view")
+    except Exception:
+        pass
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "total_rows": len(report.get("rows", [])), "sample_ids": sample_ids, "period": report.get("period")}
